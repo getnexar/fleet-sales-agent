@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# Frontend deps (not build output — static/ is needed for nap deploy)
+frontend/node_modules/
+frontend/dist/
+
+# Exports / local data
+exported_sessions/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
