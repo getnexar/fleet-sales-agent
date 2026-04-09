@@ -1,0 +1,27 @@
+# FastAPI and server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# Anthropic Claude API
+anthropic>=0.40.0
+
+# Google Firestore
+firebase-admin>=6.5.0
+
+# Google Cloud Storage (for FAQ config)
+google-cloud-storage>=2.0.0
+
+# Google Secret Manager (for Slack webhook)
+google-cloud-secret-manager>=2.0.0
+
+# HTTP client for Slack webhook
+httpx>=0.24.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# DocuSign e-signature (JWT auth requires RS256 signing)
+PyJWT>=2.8.0
+cryptography>=42.0.0

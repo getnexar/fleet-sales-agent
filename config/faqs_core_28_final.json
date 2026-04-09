@@ -1,0 +1,346 @@
+[
+  {
+    "question": "What are the pricing options for the dash cams?",
+    "answer": "Hardware pricing by model:\n\n**[Beam 2 Mini](https://fleet.getnexar.com/dashcams)** (road-only, 1080p)\n- 128GB — **$159.95** (25-122 hrs local backup)\n- 256GB — **$189.95** (55-255 hrs local backup)\n\n**[Beam 2](https://fleet.getnexar.com/dashcams)** (road + cabin, 1080p)\n- 128GB — **$289.95** (15-61 hrs local backup)\n- 256GB — **$299.95** (32-127 hrs local backup)\n\n**[Nexar One](https://fleet.getnexar.com/dashcams)** (road + cabin, 4K)\n- 128GB — **$379.95**\n- 256GB — **$429.95**\n\nAll models include a subscription per camera per month:\n\n- **$25/month** — no contract\n- **$19.99/month** — 1-year plan\n- **$17.99/month** — 2-year plan\n- **$14.99/month** — 3-year plan",
+    "source": "official",
+    "source_note": "The answer is based entirely on the official knowledge base, which provides specific pricing details for hardware and subscription plans.",
+    "category": "pricing",
+    "consolidated_from": [
+      "What are the pricing options for the dash cams?",
+      "What are the costs associated with the dash cam, including initial purchase and subscription fees?",
+      "What are the costs for the dashcam hardware and subscription services?"
+    ]
+  },
+  {
+    "question": "What is the installation process for the dash cams?",
+    "answer": "The installation can be done using two options: a plug-and-play solution with an OBD-II port adapter or a hardwiring kit for added security. The installation involves six main steps: 1) Unbox and remove side lids for modules 2) Connect add-ons (Connectivity module to right, cabin camera to left) 3) Mount assembly with magnetic mount 4) Power on via OBD adapter or charger 5) Install on windshield (remove lens film, peel adhesive, affix) 6) Cable management with provided clips. The cameras come pre-activated and take approximately 15-20 minutes to charge and complete the activation process after plugging into the power source.",
+    "source": "mixed",
+    "source_note": "Official documentation provided detailed installation steps and power methods, supplemented with sales call information about pre-activation.",
+    "category": "implementation",
+    "consolidated_from": [
+      "What is the installation process for the dash cams?",
+      "Can the dash cams be hardwired or installed using a plug-and-play method?"
+    ]
+  },
+  {
+    "question": "What are the subscription fees after the trial period?",
+    "answer": "After the trial period, the subscription fees are $25/month with no contract commitment, $19.99/month for a one-year contract, $17.99/month for a two-year contract, and $14.99/month for a three-year contract.",
+    "source": "official",
+    "source_note": "The answer is directly supported by the official knowledge base under the pricing section.",
+    "category": "pricing",
+    "consolidated_from": [
+      "What are the subscription fees after the trial period?",
+      "What are the subscription options available for the dash cam service?"
+    ]
+  },
+  {
+    "question": "What features are offered by the dash cam?",
+    "answer": "The dash cam offers features including built-in GPS tracking that updates every 30 seconds for precise real-time vehicle location mapping, live streaming on demand with a 3-minute session limit, automatic cloud backup for video data when collisions or incidents occur, and geofencing capabilities that allow users to set up custom geographic boundaries with real-time alerts and summary reports. Additionally, it includes automatic incident detection for high-impact events, harsh cornering, and hard braking.",
+    "source": "official",
+    "source_note": "The answer is based on the features listed in the Official Knowledge Base, specifically under the 'features' section.",
+    "category": "features",
+    "consolidated_from": [
+      "What features are offered by the dash cam?",
+      "What features should we consider for a dash cam used in fleet management?"
+    ]
+  },
+  {
+    "question": "What types of dash cams do you offer for fleets?",
+    "answer": "We offer three dashcam models for fleets:\n\n- **Nexar One** — Premium 3-part system: road camera + detachable cabin view camera + LTE module. 4K lenses. Best for fleets that want the highest video quality and driver/in-cabin monitoring.\n- **Beam 2** — Road + cabin view in one integrated unit. 1080p. Great for fleets that need driver and in-cabin monitoring at a mid-range price.\n- **Beam 2 Mini** — Road-facing only (no cabin view). 1080p. Most affordable and compact option, ideal if you only need to record the road ahead.\n\nAll models support Fleet Guardian mode for parking monitoring. The right choice depends on whether you need cabin view and how important video resolution is to you.",
+    "source": "mixed",
+    "source_note": "The answer includes details from the official documentation regarding the available models and their features, supplemented with sales call information for clarity.",
+    "category": "features",
+    "consolidated_from": [
+      "What types of dash cams do you offer for fleets?",
+      "What are the differences between the various dash cam options?"
+    ]
+  },
+  {
+    "question": "How is the dash cam powered?",
+    "answer": "The dash cam is powered by the OBD-II port of the vehicle, which is a plug-and-play installation option. It can also be hardwired using an additional kit, which is more secure and may require professional installation. The dash cam does not require Wi-Fi as it is equipped with a built-in SIM card for GPS functionality.",
+    "source": "mixed",
+    "source_note": "The answer combines official documentation about power methods and installation options with additional details from sales calls.",
+    "category": "technical",
+    "consolidated_from": [
+      "How is the dash cam powered?",
+      "What is the difference between the hardwiring kit and the OBD kit?"
+    ]
+  },
+  {
+    "question": "What are the available memory card sizes for the dash cam and how much data can they store?",
+    "answer": "Available memory options and local backup hours by model:\n\n**[Beam 2 Mini](https://fleet.getnexar.com/dashcams)** (road-only)\n- 128GB — 25 to 122 hours of local footage\n- 256GB — 55 to 255 hours of local footage\n\n**[Beam 2](https://fleet.getnexar.com/dashcams)** (road + cabin, dual camera)\n- 128GB — 15 to 61 hours of local footage\n- 256GB — 32 to 127 hours of local footage\n\nDual-camera models store less per GB than road-only models since they record two streams simultaneously. All incident footage is also backed up to the cloud indefinitely, regardless of local storage size.",
+    "source": "mixed",
+    "source_note": "Official documentation provided specific memory sizes and storage capacities, supplemented with sales call information regarding the 256GB card's storage duration.",
+    "category": "technical",
+    "consolidated_from": [
+      "What are the available memory card sizes for the dash cam and how much data can they store?",
+      "What happens when the camera's storage or SD card is full?"
+    ]
+  },
+  {
+    "question": "What is included in the subscription plan?",
+    "answer": "The subscription plan includes unlimited cloud storage for incidents, GPS tracking, live streaming access, dashboard access, automatic incident detection, geofencing alerts, and firmware updates, with no hidden charges.",
+    "source": "official",
+    "source_note": "The answer is based on the official documentation regarding subscription plan features.",
+    "category": "features",
+    "consolidated_from": [
+      "What is included in the subscription plan?",
+      "How does the subscription model work for the dash cam, and what are the implications of canceling the subscription?"
+    ]
+  },
+  {
+    "question": "What happens if I don't like the product during the trial period?",
+    "answer": "If you're not satisfied during the 30-day trial period, you can get a full refund with no questions asked for up to 2 opened units. Additional opened cameras incur a $150 restocking fee each. To initiate a return, contact support at 929-470-0536 within 30 days.",
+    "source": "mixed",
+    "source_note": "The answer combines official documentation regarding the trial period and refund policy with additional details from sales calls.",
+    "category": "support",
+    "consolidated_from": [
+      "What happens if I'm not satisfied with the product during the trial period?",
+      "What is the trial period for the dash cam?"
+    ]
+  },
+  {
+    "question": "What are the terms of the contract, including penalties for early termination?",
+    "answer": "There is a flexible month-to-month option at $25/month with no commitment. For those who prefer a contract, there are three plans: $19.99/month for a 1-year contract, $17.99/month for a 2-year contract, and $14.99/month for a 3-year contract.\n\n**Early termination penalty:** If you cancel during the contract term, you owe a lump-sum equal to the monthly subscription fee × number of cameras × remaining months in the contract. For example, canceling a 3-year plan after 2 years with 10 cameras at $14.99/month = $14.99 × 10 × 12 = $1,798.80.\n\nOnce the initial term ends, either side can cancel with 30 days written notice, no penalty.\n\nCamera hardware is non-refundable once purchased.",
+    "source": "official",
+    "source_note": "Early termination penalty formula and post-term cancellation terms sourced directly from Nexar Fleet Terms of Service at fleet.getnexar.com/terms.",
+    "category": "pricing",
+    "consolidated_from": [
+      "What are the terms of the contract, including penalties for early termination?",
+      "What happens if I need to stop the subscription before the end of the three-year plan?"
+    ]
+  },
+  {
+    "question": "Can I upgrade my subscription from a one-year plan to a longer term?",
+    "answer": "Yes, you can start with a one-year plan at $19.99/month and upgrade to a two-year plan at $17.99/month or a three-year plan at $14.99/month later.",
+    "source": "mixed",
+    "source_note": "The answer combines official pricing details from the knowledge base with confirmation from sales calls about the ability to upgrade plans.",
+    "category": "pricing",
+    "consolidated_from": [
+      "Can I upgrade my subscription from a one-year plan to a longer term?",
+      "Can I switch to a two-year plan after starting with a one-year plan?"
+    ]
+  },
+  {
+    "question": "What happens if I add new trucks to my fleet?",
+    "answer": "You can order additional cameras by contacting the Fleets Sales Team at (929) 447-2317 or fleethelp@getnexar.com. The additional cameras will be added to your existing dashboard at the same price as your initial order.",
+    "source": "mixed",
+    "source_note": "The answer combines the official process for ordering additional cameras from the support section with the sales call information about pricing.",
+    "category": "support",
+    "consolidated_from": [
+      "What happens if I add new trucks to my fleet?",
+      "Can I purchase only one camera for now?"
+    ]
+  },
+  {
+    "question": "What support options are available?",
+    "answer": "Support options include live chat available in the dashboard (navigate to More > Support > Contact Us for instant assistance, weekdays 9 AM-8 PM EST), phone support at +1 (929) 470-0536 (Mon-Fri, 8 AM-8 PM EST), and email support at fleethelp@getnexar.com. Additionally, there is a help center with reading materials.",
+    "source": "mixed",
+    "source_note": "Official documentation provided details on support options, supplemented with sales call information about the help center.",
+    "category": "support",
+    "consolidated_from": [
+      "What support options are available?",
+      "What happens if I experience a technical issue with the camera?"
+    ]
+  },
+  {
+    "question": "Can I track my drivers remotely?",
+    "answer": "Yes, you can track your drivers remotely from your office using the web-based dashboard at fleets.getnexar.com, which includes real-time vehicle tracking and incident filtering.",
+    "source": "official",
+    "source_note": "The answer is based on the official documentation regarding the features of the fleet dashboard, specifically mentioning real-time vehicle tracking.",
+    "category": "features",
+    "consolidated_from": [
+      "Can I track my drivers remotely?",
+      "What features are available on the fleet dashboard, and will rear cameras be included?"
+    ]
+  },
+  {
+    "question": "What is the process for placing an order?",
+    "answer": "The easiest way to get started is to leave your contact details and our sales team will reach out to walk you through everything — pricing, camera selection, and next steps. Just share your name, email, phone number, and business name, and someone from our team will be in touch within 1 business day.",
+    "source": "official",
+    "source_note": "Updated with agentic-first approach - agent handles order initiation autonomously by collecting required information (business info, contact details, shipping address) and triggering automated processes.",
+    "category": "implementation",
+    "consolidated_from": [
+      "What is the process for placing an order?",
+      "Can I purchase only one camera for now?"
+    ]
+  },
+  {
+    "question": "How does the dash cam operate when the vehicle is on or off?",
+    "answer": "The dash cam records whenever the vehicle is on and uses Fleet Guardian mode for continuous security monitoring even when the engine is off. It automatically detects and records incidents (impact or motion) while parked, with users able to set session duration from 12 hours to unlimited with adjustable sensitivity. Note that unlimited duration may increase battery drain risk.",
+    "source": "mixed",
+    "source_note": "The answer includes information from the official documentation about Fleet Guardian mode and its features, supplemented with details from sales calls.",
+    "category": "features",
+    "consolidated_from": [
+      "How does the dash cam operate when the vehicle is on or off?",
+      "What happens if the dash cam is not compatible with my truck's OBD?"
+    ]
+  },
+  {
+    "question": "What happens if the dash cam is not compatible with my truck's OBD?",
+    "answer": "If the dash cam is not compatible with your truck's OBD-II port, you can use an adapter for compatibility or choose to have the cameras hardwired, which is more secure and may require professional installation.",
+    "source": "mixed",
+    "source_note": "The answer combines official documentation regarding installation options with additional details from sales calls.",
+    "category": "technical",
+    "consolidated_from": [
+      "What happens if the dash cam is not compatible with my truck's OBD?",
+      "What is an OBD II port and do I need to buy anything for it?"
+    ]
+  },
+  {
+    "question": "What is the cloud storage capacity for incidents?",
+    "answer": "All incidents are stored in the cloud indefinitely, providing unlimited cloud storage for event footage.",
+    "source": "official",
+    "source_note": "The answer is directly supported by the official documentation stating that incidents are stored for review and that the subscription includes unlimited cloud storage for incidents.",
+    "category": "features",
+    "consolidated_from": [
+      "How does cloud storage work for recorded events and what options are available?",
+      "What is included in the subscription plan?"
+    ]
+  },
+  {
+    "question": "What happens if I experience a technical issue with the camera?",
+    "answer": "For technical issues, you need to contact support via phone at +1 (929) 470-0536, email at fleethelp@getnexar.com, or use the in-dashboard live chat. If the issue cannot be resolved, the unit will be replaced.",
+    "source": "mixed",
+    "source_note": "The answer combines official support contact information with the sales call information regarding unit replacement.",
+    "category": "support",
+    "consolidated_from": [
+      "What happens if I experience a technical issue with the camera?",
+      "What support options are available?"
+    ]
+  },
+  {
+    "question": "What is the estimated delivery time for the dash cams?",
+    "answer": "For in-stock orders, we guarantee delivery within 3-5 business days. For larger orders that may not be in stock, we'll need to check with our logistics team. Please let me know: 1) How many cameras do you need? 2) Do you prefer to receive everything in one shipment, or would you like to split the order into batches to get some cameras sooner? Camera manufacturing typically takes 45-60 business days, so even for custom orders, delivery shouldn't exceed that timeframe.",
+    "source": "official",
+    "source_note": "Updated with official delivery policy: 3-5 business days for in-stock, logistics coordination for large orders, 45-60 business days maximum for manufacturing.",
+    "category": "support",
+    "consolidated_from": [
+      "What is the estimated delivery time for the road and cabin dash cams?",
+      "When will the cameras be available for delivery?"
+    ]
+  },
+  {
+    "question": "What are the differences between fleet and consumer accounts?",
+    "answer": "The fleet account provides exclusive features such as a centralized dashboard with map clustering, remote live streaming, automatic incident detection alerts, unlimited cloud storage for incidents, geofencing with custom alerts, driver and vehicle assignment, and multi-fleet access view. In contrast, the consumer account does not have these features, lacking a centralized fleet dashboard, remote management, geofencing, multi-vehicle view, incident alerts, and driver assignment.",
+    "source": "official",
+    "source_note": "The answer is based on the official documentation regarding fleet and consumer account features.",
+    "category": "features",
+    "consolidated_from": [
+      "What are the differences between fleet and consumer accounts?",
+      "What features are available on the fleet dashboard, and will rear cameras be included?"
+    ]
+  },
+  {
+    "question": "Can I view the inside of my vehicle and live stream from the cameras?",
+    "answer": "The camera system offers live road video streaming on demand, with each session limited to 3 minutes. You can live stream in real time from both the road and cabin cameras.",
+    "source": "mixed",
+    "source_note": "The answer combines official information about live streaming from the knowledge base with additional context from sales calls.",
+    "category": "features",
+    "consolidated_from": [
+      "Can I view the inside of my vehicle and live stream from the cameras?",
+      "What features are available on the fleet dashboard, and will rear cameras be included?"
+    ]
+  },
+  {
+    "question": "What happens if I cancel my subscription?",
+    "answer": "If you cancel your subscription during the 30-day trial period, you will receive a full refund for all unopened cameras returned within 30 days. If you cancel after the trial period, you will be responsible for the subscription fees.",
+    "source": "mixed",
+    "source_note": "The answer includes the official 30-day trial period and refund policy from the Official Knowledge Base, supplemented with sales call information regarding subscription fees.",
+    "category": "support",
+    "consolidated_from": [
+      "What happens if I cancel my subscription?",
+      "What is the trial period for the dash cam?"
+    ]
+  },
+  {
+    "question": "What are the promotional prices and special offers for fleets and long-term deals?",
+    "answer": "Promotional prices for fleets are competitive, with discounts available for bulk orders and long-term contracts. Subscription plans are available at $19.99/month for a 1-year contract, $17.99/month for a 2-year contract, and $14.99/month for a 3-year contract, with the lowest price being $14.99/month per camera with a 3-year commitment.",
+    "source": "mixed",
+    "source_note": "The answer includes general information from sales calls and specific subscription pricing from the official documentation.",
+    "category": "pricing",
+    "consolidated_from": [
+      "Are there any discounts available for dash cams, including for bulk orders or larger fleets?",
+      "What are the promotional prices and special offers for fleets and long-term deals?"
+    ]
+  },
+  {
+    "question": "How does the dashboard display vehicle locations for fleets with fewer than 50 vehicles?",
+    "answer": "For fleets with fewer than 50 vehicles, the dashboard shows individual vehicle locations without clustering them.",
+    "source": "sales_calls",
+    "source_note": "The official documentation does not provide specific details about how the dashboard displays vehicle locations for fleets with fewer than 50 vehicles.",
+    "category": "features",
+    "consolidated_from": [
+      "How does the dashboard display vehicle locations for fleets with fewer than 50 vehicles?",
+      "What features are available on the fleet dashboard, and will rear cameras be included?"
+    ]
+  },
+  {
+    "question": "Can I access and download footage from the dash cams?",
+    "answer": "You can access and download video footage from the dash cams through a web-based dashboard at fleets.getnexar.com. By logging in, you can view everything remotely and fetch clips of incidents for download, with clip retrieval options ranging from 30 seconds to 5 minutes, as long as they're still stored in the dash cam's memory.",
+    "source": "mixed",
+    "source_note": "The answer includes official information about accessing the web-based dashboard and clip retrieval options, supplemented with sales call details about remote viewing.",
+    "category": "features",
+    "consolidated_from": [
+      "How can I access and download footage from the dash cams?",
+      "What happens when the camera's storage or SD card is full?"
+    ]
+  },
+  {
+    "question": "What are the differences between the Beam 2 Mini, Beam 2, and Nexar One cameras?",
+    "answer": "Here's how the three models compare:\n\n| Feature | Beam 2 Mini | Beam 2 | Nexar One |\n|---------|------------|--------|----------|\n| Cabin view (driver + in-car monitoring) | ❌ No | ✅ Yes | ✅ Yes |\n| Video resolution | 1080p | 1080p | 4K lenses |\n| Camera design | Road-only, compact | Road + cabin integrated | 3-part modular system |\n| Fleet Guardian (parking mode) | ✅ | ✅ | ✅ |\n| Hardware price (128GB) | **$159.95** | **$289.95** | **$379.95** |\n| Hardware price (256GB) | **$189.95** | **$299.95** | **$429.95** |\n\n**Key deciding factors:**\n- Need to monitor drivers or in-car activity? → Beam 2 or Nexar One\n- 4K video quality important? → Nexar One\n- Road-only recording + best price? → Beam 2 Mini",
+    "source": "mixed",
+    "source_note": "The answer combines details from the official documentation regarding the features of Beam 2 and Nexstar One, supplemented by sales call information about video quality.",
+    "category": "features",
+    "consolidated_from": [
+      "What are the differences between the Beam 2 and Nexstar One cameras?",
+      "What features are available on the fleet dashboard, and will rear cameras be included?"
+    ]
+  },
+  {
+    "question": "What happens if the dash cam is unplugged?",
+    "answer": "The Fleets Dashboard (fleets.getnexar.com) actively monitors camera health and sends email notifications to fleet managers when issues are detected. If a dash cam is unplugged, you'll receive a 'Power Unplugged' alert via email. You'll also be notified when the issue is resolved and the camera is back online. Other camera health alerts include 'No Clear Driver View' (IFC disconnected) and 'Limited Road View'. The dashboard will also show the camera as offline.",
+    "source": "official",
+    "source_note": "Official Fleets Dashboard feature: camera health monitoring with email notifications for power unplugged events and recovery.",
+    "category": "features",
+    "consolidated_from": [
+      "Will we be notified if the dash cam is unplugged?",
+      "What happens if I experience a technical issue with the camera?"
+    ]
+  },
+  {
+    "question": "Which dashcam model is right for my fleet?",
+    "answer": "The right model depends on two things: whether you need to see inside the vehicle, and how important video quality is.\n\n**Start here — do you need a cabin view camera?**\nThe cabin camera monitors your drivers and records in-car activity (passenger incidents, cargo handling, driver behavior). It's useful for accountability, dispute resolution, and safety coaching.\n\n- **No cabin view needed** → [Beam 2 Mini](https://fleet.getnexar.com/dashcams) — most affordable, road-facing only, compact\n- **Yes, cabin view needed** → go to the next question\n\n**Is 4K video quality important to you?**\nHigher resolution means clearer license plates, better incident evidence, and sharper footage for insurance claims.\n\n- **Yes, 4K matters** → [Nexar One](https://fleet.getnexar.com/dashcams) — 4K lenses, detachable cabin camera, premium build\n- **1080p is fine** → [Beam 2](https://fleet.getnexar.com/dashcams) — road + cabin integrated in one unit, solid mid-range choice\n\nAll three models include GPS tracking, Fleet Guardian parking mode, automatic incident detection, and unlimited cloud storage for events.",
+    "source": "official",
+    "source_note": "Camera recommendation guide based on official product specifications and key differentiators.",
+    "category": "features",
+    "consolidated_from": [
+      "Which dashcam model is right for my fleet?",
+      "What camera should I get?",
+      "Help me choose a dashcam"
+    ]
+  },
+  {
+    "question": "Should I get the 128GB or 256GB memory option?",
+    "answer": "Both options work well — the difference is how long local footage stays on the camera before it overwrites itself.\n\n**Beam 2 Mini:**\n- 128GB — **$159.95** — 25-122 hrs local backup\n- 256GB — **$189.95** — 55-255 hrs local backup\n\n**Beam 2:**\n- 128GB — **$289.95** — 15-61 hrs local backup\n- 256GB — **$299.95** — 32-127 hrs local backup\n\n**Go with 256GB if:**\n- Your drivers are on the road for long shifts\n- You want a longer buffer for reviewing footage manually\n- You operate in areas with spotty connectivity (more local storage as backup)\n\n**128GB is fine if:**\n- You mainly rely on cloud-stored incident clips\n- You want to keep upfront costs lower\n\nRemember: all incident footage is automatically backed up to the cloud regardless of which option you choose.",
+    "source": "official",
+    "source_note": "Based on official post-call quote pricing and backup hour specifications.",
+    "category": "pricing",
+    "consolidated_from": [
+      "Should I get 128GB or 256GB?",
+      "What is the difference between memory card sizes?"
+    ]
+  },
+  {
+    "question": "How does Nexar handle driver privacy and data?",
+    "answer": "Nexar takes privacy seriously. Cabin camera footage is only accessible to fleet managers through the secure dashboard — drivers are not monitored without company policy in place. Video data is encrypted in transit and at rest. Incident footage is stored in the cloud indefinitely, while continuous local footage overwrites itself when the memory card is full. For full details on how Nexar collects, uses, and protects data, you can review the privacy policy at https://www.getnexar.com/privacy/.",
+    "source": "official",
+    "source_note": "Based on Nexar's published privacy policy and standard fleet data handling practices.",
+    "category": "privacy",
+    "consolidated_from": [
+      "How does Nexar handle driver privacy?",
+      "What data does the dash cam collect?",
+      "Is the cabin camera footage private?"
+    ]
+  }
+]

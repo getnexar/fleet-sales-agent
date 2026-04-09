@@ -1,0 +1,30 @@
+app_id: fleet-sales-agent
+name: Fleet Sales AI Agent
+description: AI-powered sales assistant for Nexar Fleet - answers FAQs, qualifies leads, and collects order information
+
+# Public access - no authentication required
+public_api: true
+
+# Resources
+resources:
+  memory: 512Mi
+  min_instances: 0
+  max_instances: 10
+  timeout: 60s
+
+# Capabilities
+capabilities:
+  - vertex-ai
+  - firestore
+  - cloud-storage
+  - secret-manager
+
+# Environment variables
+env:
+  APP_ENV: production
+  LOG_LEVEL: INFO
+  GCS_CONFIG_BUCKET: fleet-sales-agent-config
+  SLACK_CHANNEL: fleet-sales-bot
+  MAX_CONVERSATION_LENGTH: 20
+  HUBSPOT_PORTAL_ID: "8456425"
+  HUBSPOT_FORM_ID: "31d85d5a-26d0-47cc-9009-c254f970303d"
