@@ -198,19 +198,18 @@ async def chat(request: ChatRequest):
         # Sanitize user input to prevent prompt injection
         clean_question = chat_service._sanitize_input(request.question)
 
-        # Sanitize conversation history: filter roles, sanitize user message content, cap length
-        _ALLOWED_ROLES = {"user", "assistant"}
+        # Load conversation history from server-side Firestore instead of trusting
+        # client-supplied history, which an attacker could manipulate to inject
+        # arbitrary prior messages and bypass sales guardrails.
+        from backend.models import Message as _Message
+        _prior_convo = await firestore_service.get_conversation(request.session_id)
+        _prior_messages = (_prior_convo or {}).get("messages", [])
         clean_history = []
-        for _msg in (request.conversation_history or []):
-            _role = getattr(_msg, "role", None)
-            if _role not in _ALLOWED_ROLES:
-                continue
-            _content = getattr(_msg, "content", "") or ""
-            # Sanitize user message content to prevent injected prompt attacks in history
-            if str(_role) == "user":
-                _content = chat_service._sanitize_input(_content)
-            clean_history.append(type(_msg)(role=_role, content=_content))
-        clean_history = clean_history[-40:]
+        for _m in _prior_messages[-40:]:
+            _role = _m.get("role", "")
+            _content = (_m.get("content") or "").strip()
+            if _role in ("user", "assistant") and _content:
+                clean_history.append(_Message(role=_role, content=_content))
 
         # Get AI response
         result = await chat_service.get_response(
