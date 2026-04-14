@@ -72,6 +72,16 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Nexar-User", "X-Nexar-User-Type"],
 )
 
+# Allow fleet.getnexar.com to embed this app in an iframe (for GTM widget injection).
+# frame-ancestors takes precedence over X-Frame-Options in modern browsers.
+@app.middleware("http")
+async def set_embedding_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "frame-ancestors https://fleet.getnexar.com https://fleet-sales-agent.corp.nexars.ai"
+    )
+    return response
+
 # Initialize services
 storage = StorageService()
 chat_service = ChatService(storage=storage)
@@ -183,10 +193,20 @@ async def chat(request: ChatRequest):
     """
     _validate_public_request(request.session_id, request.question)
     try:
+        # Sanitize user input to prevent prompt injection
+        clean_question = chat_service._sanitize_input(request.question)
+
+        # Sanitize conversation history: only allow known roles, cap length, strip injection patterns
+        _ALLOWED_ROLES = {"user", "assistant"}
+        clean_history = [
+            msg for msg in (request.conversation_history or [])
+            if getattr(msg, "role", None) in _ALLOWED_ROLES
+        ][-40:]  # cap at last 40 messages to limit context manipulation surface
+
         # Get AI response
         result = await chat_service.get_response(
-            question=request.question,
-            conversation_history=request.conversation_history,
+            question=clean_question,
+            conversation_history=clean_history,
         )
 
         answer = result.get("answer", "")
@@ -571,9 +591,15 @@ if STATIC_DIR.exists():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        file_path = STATIC_DIR / full_path
-        if file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
+        # Resolve and validate path is within STATIC_DIR to prevent directory traversal
+        try:
+            resolved = (STATIC_DIR / full_path).resolve()
+            if not str(resolved).startswith(str(STATIC_DIR.resolve()) + "/") and resolved != STATIC_DIR.resolve():
+                return FileResponse(STATIC_DIR / "index.html")
+            if resolved.exists() and resolved.is_file():
+                return FileResponse(resolved)
+        except Exception:
+            pass
         return FileResponse(STATIC_DIR / "index.html")
 else:
     @app.get("/")
