@@ -61,8 +61,10 @@ app = FastAPI(
 )
 
 _ALLOWED_ORIGINS = ["https://fleet-sales-agent.corp.nexars.ai", "https://fleet.getnexar.com"]
-if os.environ.get("DEV_MODE") == "true":
-    _ALLOWED_ORIGINS += ["http://localhost:5173", "http://localhost:3000"]
+# Local development: add origins via EXTRA_CORS_ORIGINS env var (comma-separated)
+_extra = [o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+if _extra:
+    _ALLOWED_ORIGINS += _extra
 
 app.add_middleware(
     CORSMiddleware,
