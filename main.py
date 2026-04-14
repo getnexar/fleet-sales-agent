@@ -198,12 +198,19 @@ async def chat(request: ChatRequest):
         # Sanitize user input to prevent prompt injection
         clean_question = chat_service._sanitize_input(request.question)
 
-        # Sanitize conversation history: only allow known roles, cap length, strip injection patterns
+        # Sanitize conversation history: filter roles, sanitize user message content, cap length
         _ALLOWED_ROLES = {"user", "assistant"}
-        clean_history = [
-            msg for msg in (request.conversation_history or [])
-            if getattr(msg, "role", None) in _ALLOWED_ROLES
-        ][-40:]  # cap at last 40 messages to limit context manipulation surface
+        clean_history = []
+        for _msg in (request.conversation_history or []):
+            _role = getattr(_msg, "role", None)
+            if _role not in _ALLOWED_ROLES:
+                continue
+            _content = getattr(_msg, "content", "") or ""
+            # Sanitize user message content to prevent injected prompt attacks in history
+            if str(_role) == "user":
+                _content = chat_service._sanitize_input(_content)
+            clean_history.append(type(_msg)(role=_role, content=_content))
+        clean_history = clean_history[-40:]
 
         # Get AI response
         result = await chat_service.get_response(
@@ -349,8 +356,12 @@ async def chat(request: ChatRequest):
                         if _hr.status_code in (200, 204):
                             await firestore_service.upsert_lead(request.session_id, {"hubspot_submitted": True})
                             logger.info(f"HubSpot contact submitted for session {request.session_id}")
+                        elif _hr.status_code in (400, 403, 404, 422):
+                            # Permanent failure — misconfigured portal/form ID or invalid field data
+                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {request.session_id}: {_hr.text[:200]}")
                         else:
-                            logger.warning(f"HubSpot submission failed: {_hr.status_code} {_hr.text[:200]}")
+                            # Transient failure — network issue or rate limit, may succeed on retry
+                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {request.session_id}: {_hr.text[:200]}")
                 except Exception as hs_err:
                     logger.error(f"HubSpot error for session {request.session_id}: {hs_err}")
                     # Fall through — don't break the conversation on HubSpot failure
