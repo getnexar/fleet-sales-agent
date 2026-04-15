@@ -309,14 +309,21 @@ async def chat(request: ChatRequest):
             if _role in ("user", "assistant") and _content:
                 clean_history.append(_Message(role=_role, content=_content))
 
-        # Get AI response.
-        # Role separation: clean_question is appended to the Anthropic messages array
-        # as {"role": "user", "content": clean_question} inside ChatService.get_response(),
-        # and is never interpolated into the system prompt string.
-        # See ChatService.get_response() in backend/chat_service.py for the full implementation.
+        # Build the messages array with explicit role separation.
+        # User-supplied content is placed ONLY in user-role messages; the system prompt
+        # is assembled separately by ChatService and passed via the Anthropic system= param.
+        _llm_messages: list = []
+        for _m in clean_history:
+            _llm_messages.append({
+                "role": "user" if _m.role == "user" else "assistant",
+                "content": chat_service._sanitize_input(_m.content) if _m.role == "user" else _m.content,
+            })
+        _llm_messages.append({"role": "user", "content": clean_question})
+
         result = await chat_service.get_response(
             question=clean_question,
             conversation_history=clean_history,
+            messages=_llm_messages,
         )
 
         # Sanitize AI-generated answer before returning to client.

@@ -307,36 +307,41 @@ Respond with ONLY valid JSON (no markdown, no code fences):
     async def get_response(
         self,
         question: str,
-        conversation_history: Optional[List[Message]] = None
+        conversation_history: Optional[List[Message]] = None,
+        messages: Optional[list] = None,
     ) -> Dict:
         """
         Get AI response for user question.
         Returns dict with answer, follow_up, cta_type, and lead_signals.
 
         Security: user question is passed to the Anthropic API as a separate user-role
-        message in the messages array ({"role": "user", "content": clean_question}) and
+        message in the messages array ({"role": "user", "content": question}) and
         is never interpolated into the system prompt string. The system prompt is passed
         via the system= parameter of client.messages.create(), maintaining strict role
         separation between instructions and user-supplied data.
+
+        When the caller pre-builds the messages array (recommended for auditability),
+        it is passed directly as the `messages` parameter. When not provided, messages
+        are constructed internally from question and conversation_history.
         """
         # Detect conversation phase and build phase-aware system prompt
         phase = detect_phase(conversation_history)
         system_prompt = self._build_system_prompt(phase)
         logger.info(f"Conversation phase: {phase.value}")
 
-        # Sanitize user input before passing to AI
-        clean_question = self._sanitize_input(question)
-
-        # Build conversation history for Anthropic (role: user/assistant)
-        messages = []
-        if conversation_history:
-            for msg in conversation_history:
-                sanitized_content = self._sanitize_input(msg.content) if msg.role == "user" else msg.content
-                messages.append({
-                    "role": "user" if msg.role == "user" else "assistant",
-                    "content": sanitized_content,
-                })
-        messages.append({"role": "user", "content": clean_question})
+        if messages is None:
+            # Build messages array: sanitize user input and apply role separation.
+            # User question is a user-role message; never interpolated into system prompt.
+            clean_question = self._sanitize_input(question)
+            messages = []
+            if conversation_history:
+                for msg in conversation_history:
+                    sanitized_content = self._sanitize_input(msg.content) if msg.role == "user" else msg.content
+                    messages.append({
+                        "role": "user" if msg.role == "user" else "assistant",
+                        "content": sanitized_content,
+                    })
+            messages.append({"role": "user", "content": clean_question})
 
         max_retries = 3
         eval_regenerated = False  # only allow one evaluator-triggered regeneration per call
