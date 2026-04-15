@@ -20,7 +20,8 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     session_id: str
-    conversation_history: Optional[List[Message]] = []
+    # conversation_history is intentionally omitted — the server loads history
+    # from Firestore to prevent client-side manipulation of prior messages.
 
 
 class ChatResponse(BaseModel):

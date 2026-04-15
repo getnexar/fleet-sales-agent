@@ -27,6 +27,24 @@ def require_corp(request: Request) -> str:
     return user
 
 
+def require_corp_export(request: Request) -> str:
+    """
+    Stricter dependency for data-export endpoints.
+    By default any @getnexar.com account is allowed; set EXPORT_ALLOWED_EMAILS (comma-separated)
+    to restrict export access to specific accounts for granular data access control.
+    """
+    user = require_corp(request)
+    _allowed = {e.strip() for e in os.environ.get("EXPORT_ALLOWED_EMAILS", "").split(",") if e.strip()}
+    if _allowed and user not in _allowed:
+        raise HTTPException(status_code=403, detail="Export access restricted to authorised accounts")
+    return user
+
+
+def _sid(session_id: str) -> str:
+    """Return first 8 chars of session ID for log correlation without full identifier exposure."""
+    return (session_id or "")[:8]
+
+
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
 
 def _validate_public_request(session_id: str, question: str) -> None:
@@ -193,8 +211,24 @@ def _redact_sensitive(text: str) -> str:
     return text
 
 
+def _redact_transcript_pii(text: str) -> str:
+    """
+    Redact contact PII (email, phone) from raw transcript content before sending to third parties.
+    Structured contact fields are submitted separately via HubSpot named fields;
+    redacting here prevents duplicate raw PII transmission in the free-text transcript.
+    """
+    text = _redact_sensitive(text)
+    text = _EMAIL_RE.sub('[email]', text)
+    text = _PHONE_RE.sub('[phone]', text)
+    return text
+
+
+_TRANSCRIPT_CHAR_LIMIT = 3000
+
+
 def _build_chatbot_summary(lead: dict, messages: list) -> str:
-    """Build the structured summary + full transcript for HubSpot chatbot_summary field."""
+    """Build the structured summary + truncated transcript for HubSpot chatbot_summary field.
+    Contact PII is redacted from the transcript — it's already submitted in structured fields."""
     lines = ["=== LEAD SUMMARY ==="]
 
     if lead.get("fleet_size"):
@@ -213,15 +247,19 @@ def _build_chatbot_summary(lead: dict, messages: list) -> str:
         lines.append(f"Subscription: {_SUBSCRIPTION_LABELS.get(lead['subscription_plan'], lead['subscription_plan'])}")
 
     lines.append("")
-    lines.append("=== FULL TRANSCRIPT ===")
+    lines.append("=== CONVERSATION SUMMARY ===")
 
+    transcript_lines = []
     for msg in messages:
         role = msg.get("role", "")
         content = (msg.get("content") or "").strip()
         if not content:
             continue
         label = "Customer" if role == "user" else "Alex"
-        lines.append(f"[{label}] {_redact_sensitive(content)}")
+        transcript_lines.append(f"[{label}] {_redact_transcript_pii(content)}")
+
+    transcript = "\n".join(transcript_lines)
+    lines.append(transcript[:_TRANSCRIPT_CHAR_LIMIT])
 
     return "\n".join(lines)
 
@@ -302,7 +340,9 @@ async def chat(request: ChatRequest):
         if phase_str == "CLOSE_QUOTE" and not any(lead_signals.values()) and _prior_msg_count >= 4:
             fallback = _extract_contact_from_text(request.question)
             if fallback:
-                logger.info(f"Fallback signal extraction: {list(fallback.keys())}")
+                # Apply same validation pipeline as AI-extracted signals before merging
+                fallback = _validate_lead_signals(fallback)
+                logger.info(f"Fallback signal extraction (validated): {list(fallback.keys())}")
                 for k, v in fallback.items():
                     # Only apply if the field isn't already confirmed in Firestore
                     if not lead_signals.get(k) and not (_existing_lead or {}).get(k):
@@ -354,7 +394,7 @@ async def chat(request: ChatRequest):
             if phase_str == "CLOSE_QUOTE" and not current_lead.get("hubspot_submitted"):
                 missing = [f for f in HUBSPOT_REQUIRED_FIELDS if not current_lead.get(f)]
                 if missing:
-                    logger.info(f"HubSpot gate: missing fields {missing} for session {request.session_id}")
+                    logger.info(f"HubSpot gate: missing fields {missing} for session {_sid(request.session_id)}")
 
             # HubSpot: submit to inbound_smb_fleets form when all required fields present
             if (
@@ -408,16 +448,16 @@ async def chat(request: ChatRequest):
                         )
                         if _hr.status_code in (200, 204):
                             await firestore_service.upsert_lead(request.session_id, {"hubspot_submitted": True})
-                            logger.info(f"HubSpot contact submitted for session {request.session_id}")
+                            logger.info(f"HubSpot contact submitted for session {_sid(request.session_id)}")
                         elif _hr.status_code in (400, 403, 404, 422):
                             # Permanent failure — misconfigured portal/form ID or invalid field data
                             # Response body not logged to avoid potential PII echo in error responses
-                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {request.session_id}")
+                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}")
                         else:
                             # Transient failure — network issue or rate limit, may succeed on retry
-                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {request.session_id}")
+                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {_sid(request.session_id)}")
                 except Exception as hs_err:
-                    logger.error(f"HubSpot error for session {request.session_id}: {hs_err}")
+                    logger.error(f"HubSpot error for session {_sid(request.session_id)}: {hs_err}")
                     # Fall through — don't break the conversation on HubSpot failure
 
         return ChatResponse(
@@ -500,7 +540,7 @@ async def list_conversations(limit: int = Query(default=50, ge=1, le=500), user:
 
 
 @app.get("/api/admin/conversations/export")
-async def export_conversations(limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp)):
+async def export_conversations(limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp_export)):
     """Export full conversation sessions (with lead data) as a downloadable JSON file."""
     import json as _json
     from fastapi.responses import Response
@@ -647,20 +687,33 @@ async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_cor
         raise HTTPException(status_code=503, detail="Service unavailable")
 
 
+_PROMPT_FORBIDDEN_PATTERNS = [
+    re.compile(r'<script[^>]*>', re.IGNORECASE),  # embedded script tags
+    re.compile(r'javascript\s*:', re.IGNORECASE),  # JS protocol handlers
+    re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'),  # non-printable control characters
+]
+
+
+def _validate_prompt_content(content: str, field_name: str) -> None:
+    """Reject prompt content that contains binary data or known injection vectors."""
+    if len(content.encode()) > _MAX_PROMPT_BYTES:
+        raise HTTPException(status_code=400, detail=f"{field_name} exceeds maximum allowed size")
+    for pattern in _PROMPT_FORBIDDEN_PATTERNS:
+        if pattern.search(content):
+            raise HTTPException(status_code=400, detail=f"{field_name} contains invalid content")
+
+
 @app.put("/api/admin/config/prompts")
 async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
-    # Validate size to prevent excessively large prompt uploads
-    if len(request.core_prompt.encode()) > _MAX_PROMPT_BYTES:
-        raise HTTPException(status_code=400, detail="core_prompt exceeds maximum allowed size")
+    _validate_prompt_content(request.core_prompt, "core_prompt")
     # Validate phase keys to reject unknown/injected phase names
     from backend.conversation_router import ConversationPhase as _CP
     valid_phases = {p.value for p in _CP}
     for phase_key, phase_content in (request.phase_prompts or {}).items():
         if phase_key not in valid_phases:
             raise HTTPException(status_code=400, detail=f"Unknown phase: {phase_key}")
-        if len((phase_content or "").encode()) > _MAX_PROMPT_BYTES:
-            raise HTTPException(status_code=400, detail=f"Phase prompt {phase_key} exceeds maximum allowed size")
+        _validate_prompt_content(phase_content or "", f"phase_prompt[{phase_key}]")
     try:
         logger.warning(f"CONFIG_CHANGE: {user} updated core prompt and phase prompts")
         storage.save_prompts(request.core_prompt, request.phase_prompts)
