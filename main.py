@@ -388,6 +388,7 @@ async def chat(request: ChatRequest):
             if (
                 phase_str == "CLOSE_QUOTE"
                 and not current_lead.get("hubspot_submitted")
+                and not current_lead.get("hubspot_permanently_failed")
                 and all(current_lead.get(f) for f in HUBSPOT_REQUIRED_FIELDS)
                 and HUBSPOT_PORTAL_ID
                 and HUBSPOT_FORM_ID
@@ -442,8 +443,12 @@ async def chat(request: ChatRequest):
                             await firestore_service.upsert_lead(request.session_id, {"hubspot_submitted": True})
                             logger.info(f"HubSpot contact submitted for session {_sid(request.session_id)}")
                         elif _hr.status_code in (400, 403, 404, 422):
-                            # Permanent failure — misconfigured portal/form ID or invalid field data
-                            # Body not logged to avoid potential PII echo; check portal/form ID config
+                            # Permanent failure — misconfigured portal/form ID or invalid field data.
+                            # Mark as permanently failed in Firestore so we don't retry on every message.
+                            # Body not logged to avoid potential PII echo; check portal/form ID config.
+                            await firestore_service.upsert_lead(
+                                request.session_id, {"hubspot_permanently_failed": True}
+                            )
                             logger.error(
                                 f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
                                 f"form submission rejected — check integration configuration"

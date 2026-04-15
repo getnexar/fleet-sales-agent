@@ -133,13 +133,15 @@ class ChatService:
         faqs = self.storage.get_faqs()
         faq_text = "".join(f"Q: {faq['question']}\nA: {faq['answer']}\n\n" for faq in faqs)
 
-        # Use GCS-managed prompt if available, fall back to hardcoded
-        core_template = self.storage.get_core_prompt() or CORE_PROMPT_TEMPLATE
+        # Use GCS-managed prompt if available, fall back to hardcoded.
+        # Sanitize GCS content before use to prevent prompt injection if GCS is compromised.
+        raw_core = self.storage.get_core_prompt()
+        core_template = self._sanitize_prompt(raw_core) if raw_core else CORE_PROMPT_TEMPLATE
         core = core_template.format(faqs=faq_text.strip())
 
         gcs_phase_prompts = self.storage.get_phase_prompts()
         if gcs_phase_prompts and phase.value in gcs_phase_prompts:
-            phase_section = gcs_phase_prompts[phase.value]
+            phase_section = self._sanitize_prompt(gcs_phase_prompts[phase.value])
         else:
             phase_section = PHASE_PROMPTS[phase]
 
@@ -249,6 +251,38 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                 )
             text = cleaned
         return text.strip()
+
+    @staticmethod
+    def _sanitize_prompt(text: str) -> str:
+        """
+        Sanitize admin-managed prompts loaded from GCS before they are assembled into
+        the system prompt. Unlike _sanitize_input, this does NOT truncate (prompts are
+        legitimately long), but it does strip control characters and known injection
+        markers that could escalate privileges if GCS content is tampered with.
+        """
+        if not text:
+            return text
+        # Remove null bytes and control characters (except newline/tab)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        injection_patterns = [
+            r'(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)forget\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)\[system\]',
+            r'(?i)<\s*system\s*>',
+            r'(?i)###\s*system',
+            r'(?i)###\s*instruction',
+            r'(?i)system\s+override',
+            r'(?i)prompt\s+injection',
+        ]
+        for pattern in injection_patterns:
+            cleaned, count = re.subn(pattern, '[removed]', text)
+            if count:
+                logger.warning(
+                    f"SECURITY: Injection pattern in GCS prompt neutralized ({count} instance(s)) — pattern: {pattern[:50]}"
+                )
+            text = cleaned
+        return text
 
     @staticmethod
     def _filter_output(answer: str) -> str:
