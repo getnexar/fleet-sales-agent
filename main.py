@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def require_corp(request: Request) -> str:
@@ -144,7 +144,6 @@ _REDACT_PATTERNS = [
 
 _PHONE_RE = re.compile(r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
 _EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
-_FLEET_SIZE_RE = re.compile(r'\b(\d+)\s*(?:vehicle|truck|van|car|fleet|unit|bus|bike)', re.IGNORECASE)
 
 # Maximum byte size for admin-managed prompt content
 _MAX_PROMPT_BYTES = 50_000
@@ -185,24 +184,6 @@ def _validate_lead_signals(signals: dict) -> dict:
             validated[k] = v
     return validated
 
-
-def _extract_contact_from_text(text: str) -> dict:
-    """
-    Fallback: parse contact signals directly from user message text.
-    Used when Claude returns non-JSON (plain text) during CLOSE_QUOTE so signals
-    aren't lost and the Firestore upsert still happens.
-    """
-    extracted = {}
-    email_match = _EMAIL_RE.search(text)
-    if email_match:
-        extracted["contact_email"] = email_match.group(0)
-    phone_match = _PHONE_RE.search(text)
-    if phone_match:
-        extracted["contact_phone"] = phone_match.group(0).strip()
-    fleet_match = _FLEET_SIZE_RE.search(text)
-    if fleet_match:
-        extracted["fleet_size"] = fleet_match.group(1)
-    return extracted
 
 def _redact_sensitive(text: str) -> str:
     """Redact accidental sensitive data (SSN, credit card numbers) from transcript."""
@@ -328,25 +309,8 @@ async def chat(request: ChatRequest):
         quote_url = None
         phase_str = result.get("_phase", "CONNECT")
 
-        # Fallback: if Claude returned non-JSON (empty lead_signals) during CLOSE_QUOTE,
-        # extract contact info directly from the user's raw message so the Firestore
-        # upsert still happens and the HubSpot gate can fire.
-        # Guards:
-        #   (1) Pre-fetch existing lead to avoid overwriting already-confirmed contact data.
-        #   (2) Require at least 4 prior messages before applying — ensures this is a
-        #       real conversation, not a one-shot CRM poisoning attempt.
+        # Pre-fetch existing lead for Slack + HubSpot checks
         _existing_lead = await firestore_service.get_lead(request.session_id)
-        _prior_msg_count = len((_prior_convo or {}).get("messages", []))
-        if phase_str == "CLOSE_QUOTE" and not any(lead_signals.values()) and _prior_msg_count >= 4:
-            fallback = _extract_contact_from_text(request.question)
-            if fallback:
-                # Apply same validation pipeline as AI-extracted signals before merging
-                fallback = _validate_lead_signals(fallback)
-                logger.info(f"Fallback signal extraction (validated): {list(fallback.keys())}")
-                for k, v in fallback.items():
-                    # Only apply if the field isn't already confirmed in Firestore
-                    if not lead_signals.get(k) and not (_existing_lead or {}).get(k):
-                        lead_signals[k] = v
 
         if any(lead_signals.values()) or phase_str == "CLOSE_QUOTE":
             lead_update = {
@@ -412,17 +376,21 @@ async def chat(request: ChatRequest):
                     messages_for_summary = (convo or {}).get("messages", [])
                     chatbot_summary = _build_chatbot_summary(current_lead, messages_for_summary)
 
-                    # Split full name into first / last
+                    # Split full name into first / last; enforce field length limits
+                    # before transmission to prevent oversized data reaching HubSpot.
                     name_parts = (current_lead.get("contact_name") or "").split()
-                    firstname = name_parts[0] if name_parts else ""
-                    lastname = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+                    firstname = (name_parts[0] if name_parts else "")[:100]
+                    lastname = (" ".join(name_parts[1:]) if len(name_parts) > 1 else "")[:100]
+                    hs_email = (current_lead.get("contact_email") or "")[:254]
+                    hs_phone = (current_lead.get("contact_phone") or "")[:20]
+                    hs_company = (current_lead.get("business_name") or "")[:200]
 
                     hs_fields = [
                         {"name": "firstname",           "value": firstname},
                         {"name": "lastname",            "value": lastname},
-                        {"name": "email",               "value": current_lead.get("contact_email", "")},
-                        {"name": "phone",               "value": current_lead.get("contact_phone", "")},
-                        {"name": "company",             "value": current_lead.get("business_name", "")},
+                        {"name": "email",               "value": hs_email},
+                        {"name": "phone",               "value": hs_phone},
+                        {"name": "company",             "value": hs_company},
                         {"name": "contact_channel",     "value": "Chat Bot"},
                         {"name": "chatbot_summary",     "value": chatbot_summary},
                     ]
@@ -451,8 +419,11 @@ async def chat(request: ChatRequest):
                             logger.info(f"HubSpot contact submitted for session {_sid(request.session_id)}")
                         elif _hr.status_code in (400, 403, 404, 422):
                             # Permanent failure — misconfigured portal/form ID or invalid field data
-                            # Response body not logged to avoid potential PII echo in error responses
-                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}")
+                            # Body not logged to avoid potential PII echo; check portal/form ID config
+                            logger.error(
+                                f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
+                                f"form submission rejected — verify HUBSPOT_PORTAL_ID and HUBSPOT_FORM_ID are correct"
+                            )
                         else:
                             # Transient failure — network issue or rate limit, may succeed on retry
                             logger.warning(f"HubSpot transient failure {_hr.status_code} for session {_sid(request.session_id)}")
@@ -481,9 +452,10 @@ async def submit_feedback(request: FeedbackRequest):
     Public endpoint (public_api: true) — intentionally unauthenticated for customer access.
     """
     _validate_public_request(request.session_id, request.question)
-    if len(request.answer or "") > 5000:
+    # Validate optional fields: answer and feedback_text can be empty but must be bounded
+    if request.answer and len(request.answer) > 2000:
         raise HTTPException(status_code=400, detail="Invalid input")
-    if len(request.feedback_text or "") > 1000:
+    if request.feedback_text and len(request.feedback_text) > 1000:
         raise HTTPException(status_code=400, detail="Invalid input")
     try:
         feedback_id = await firestore_service.save_feedback(
@@ -579,10 +551,10 @@ async def get_conversation(session_id: str, user: str = Depends(require_corp)):
 
 class ConversationRatingRequest(BaseModel):
     rating: Literal["thumbs_up", "thumbs_down"]
-    notes: str = ""
+    notes: str = Field(default="", max_length=2000)
     # For thumbs_down: include a representative Q&A pair to run triage against
-    question: str = ""
-    answer: str = ""
+    question: str = Field(default="", max_length=2000)
+    answer: str = Field(default="", max_length=5000)
 
 
 @app.post("/api/admin/conversations/{session_id}/rate")
@@ -673,11 +645,17 @@ class ConfigFaqsUpdate(BaseModel):
 class ConfigPromptsUpdate(BaseModel):
     core_prompt: str
     phase_prompts: dict
+    # Explicit change-approval fields — required to prevent accidental/unauthorized changes.
+    # The caller must state why they're changing the prompts and confirm their identity.
+    change_reason: str = ""
+    confirmed_by: str = ""  # Must match the authenticated user's email
 
 
 @app.put("/api/admin/config/faqs")
 async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_corp)):
     """Overwrite FAQ JSON in GCS and reload cache."""
+    if len(request.faqs) > 500:
+        raise HTTPException(status_code=400, detail="FAQ list exceeds maximum allowed entries (500)")
     try:
         logger.warning(f"CONFIG_CHANGE: {user} updated FAQs ({len(request.faqs)} entries)")
         storage.save_faqs(request.faqs)
@@ -706,6 +684,12 @@ def _validate_prompt_content(content: str, field_name: str) -> None:
 @app.put("/api/admin/config/prompts")
 async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
+    # Explicit change-approval gate: caller must acknowledge with a reason and their own email.
+    # This prevents unintended changes and provides a lightweight approval record in logs.
+    if len(request.change_reason.strip()) < 10:
+        raise HTTPException(status_code=400, detail="change_reason is required (minimum 10 characters)")
+    if request.confirmed_by.strip().lower() != user.lower():
+        raise HTTPException(status_code=400, detail="confirmed_by must match your authenticated user email")
     _validate_prompt_content(request.core_prompt, "core_prompt")
     # Validate phase keys to reject unknown/injected phase names
     from backend.conversation_router import ConversationPhase as _CP
