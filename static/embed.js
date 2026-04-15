@@ -8,7 +8,7 @@
   window.__nexarFleetWidgetLoaded = true;
 
   var AGENT_URL = 'https://fleet-sales-agent.nexar.app';
-  var NEXAR_BLUE = '#000000';
+  var NEXAR_BLUE = '#23E7D8';
   var CLOSE_COLOR = '#444';
 
   /* ── Styles ─────────────────────────────────────────────────────────── */
