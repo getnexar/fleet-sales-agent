@@ -10,7 +10,9 @@ from pathlib import Path
 
 import asyncio
 import re
+import time
 import uuid
+from collections import defaultdict
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -82,7 +84,23 @@ app = FastAPI(
 _ALLOWED_ORIGINS = ["https://fleet-sales-agent.corp.nexars.ai", "https://fleet.getnexar.com"]
 # Local development: add origins via EXTRA_CORS_ORIGINS env var (comma-separated).
 # Only origins matching trusted domains are accepted — others are silently ignored.
-_ORIGIN_PATTERN = re.compile(r'^https://[\w.-]+\.(?:nexar\.app|getnexar\.com)$')
+# Single-level subdomain only (no dots allowed) to prevent subdomain-takeover escalation
+_ORIGIN_PATTERN = re.compile(r'^https://[a-z0-9-]+\.(?:nexar\.app|getnexar\.com)$')
+
+# Simple per-session rate limiter: max 30 messages per 60-second window
+# Prevents automated lead injection and CRM pollution via the chat endpoint.
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX = 30
+_rate_windows: dict = defaultdict(list)
+
+def _check_chat_rate_limit(session_id: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    _rate_windows[session_id] = [t for t in _rate_windows[session_id] if t > cutoff]
+    if len(_rate_windows[session_id]) >= _RATE_LIMIT_MAX:
+        return False
+    _rate_windows[session_id].append(now)
+    return True
 _extra = [
     o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",")
     if o.strip() and _ORIGIN_PATTERN.match(o.strip())
@@ -258,6 +276,8 @@ async def chat(request: ChatRequest):
     Also extracts lead signals and triggers Slack notifications when appropriate.
     """
     _validate_public_request(request.session_id, request.question)
+    if not _check_chat_rate_limit(request.session_id):
+        raise HTTPException(status_code=429, detail="Too many requests")
     try:
         # Sanitize user input to prevent prompt injection
         clean_question = chat_service._sanitize_input(request.question)
@@ -445,7 +465,7 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"Chat error: {type(e).__name__}")
+        logger.error(f"Chat error: {type(e).__name__}: {str(e)[:200]}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -523,7 +543,8 @@ async def export_conversations(request: Request, limit: int = Query(default=25, 
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
-    client_ip = request.client.host if request.client else "unknown"
+    # Use X-Forwarded-For to get real client IP behind Cloud Run / load balancer
+    client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown").split(",")[0].strip()
     logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
         detail = await firestore_service.get_conversation(s["session_id"])
@@ -570,9 +591,9 @@ async def rate_conversation(
     request: ConversationRatingRequest,
     user: str = Depends(require_corp),
 ):
+    """Rate a conversation and (for thumbs_down) trigger async Gemini triage."""
     if not _UUID_RE.match(session_id):
         raise HTTPException(status_code=400, detail="Invalid session ID")
-    """Rate a conversation and (for thumbs_down) trigger async Gemini triage."""
     await firestore_service.rate_conversation(
         session_id=session_id,
         rating=request.rating,
@@ -604,7 +625,7 @@ async def rate_conversation(
                     result = await chat_service.triage_feedback(
                         question=chat_service._sanitize_input(request.question),
                         answer=chat_service._sanitize_input(request.answer),
-                        admin_notes=request.notes,
+                        admin_notes=chat_service._sanitize_input(request.notes),
                         faq_titles=faq_titles,
                         phase_names=phase_names,
                     )
