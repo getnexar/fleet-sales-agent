@@ -128,6 +128,45 @@ _PHONE_RE = re.compile(r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b
 _EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
 _FLEET_SIZE_RE = re.compile(r'\b(\d+)\s*(?:vehicle|truck|van|car|fleet|unit|bus|bike)', re.IGNORECASE)
 
+# Maximum byte size for admin-managed prompt content
+_MAX_PROMPT_BYTES = 50_000
+
+
+def _validate_lead_signals(signals: dict) -> dict:
+    """
+    Validate and sanitize AI-extracted lead signal values.
+    Ensures contact data meets expected formats/ranges before writing to Firestore,
+    preventing prompt injection from producing arbitrary CRM data.
+    """
+    validated = {}
+    for k, v in signals.items():
+        if v is None:
+            continue
+        if k == "contact_email":
+            if isinstance(v, str) and re.fullmatch(
+                r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', v.strip()
+            ):
+                validated[k] = v.strip()[:254]
+        elif k == "contact_phone":
+            digits = re.sub(r'\D', '', str(v))
+            if 7 <= len(digits) <= 15:
+                validated[k] = str(v)[:20]
+        elif k == "fleet_size":
+            try:
+                fs = int(float(str(v)))
+                if 1 <= fs <= 100_000:
+                    validated[k] = fs
+            except (ValueError, TypeError):
+                pass
+        elif k in ("contact_name", "business_name"):
+            if isinstance(v, str) and 1 <= len(v.strip()) <= 200:
+                validated[k] = v.strip()
+        elif isinstance(v, str):
+            validated[k] = v[:500]
+        else:
+            validated[k] = v
+    return validated
+
 
 def _extract_contact_from_text(text: str) -> dict:
     """
@@ -226,7 +265,9 @@ async def chat(request: ChatRequest):
         answer = result.get("answer", "")
         follow_up = result.get("follow_up")
         cta_type = result.get("cta_type")
-        lead_signals = result.get("lead_signals", {})
+        # Validate AI-extracted lead signals against expected formats/ranges.
+        # Prevents prompt injection from producing arbitrary contact data in the CRM.
+        lead_signals = _validate_lead_signals(result.get("lead_signals", {}) or {})
 
         # Build suggested follow-ups list
         follow_ups = [follow_up] if follow_up else []
@@ -252,10 +293,13 @@ async def chat(request: ChatRequest):
         # Fallback: if Claude returned non-JSON (empty lead_signals) during CLOSE_QUOTE,
         # extract contact info directly from the user's raw message so the Firestore
         # upsert still happens and the HubSpot gate can fire.
-        # Pre-fetch existing lead to avoid overwriting already-confirmed contact data
-        # (prevents a bad actor from injecting a third party's contact details).
+        # Guards:
+        #   (1) Pre-fetch existing lead to avoid overwriting already-confirmed contact data.
+        #   (2) Require at least 4 prior messages before applying — ensures this is a
+        #       real conversation, not a one-shot CRM poisoning attempt.
         _existing_lead = await firestore_service.get_lead(request.session_id)
-        if phase_str == "CLOSE_QUOTE" and not any(lead_signals.values()):
+        _prior_msg_count = len((_prior_convo or {}).get("messages", []))
+        if phase_str == "CLOSE_QUOTE" and not any(lead_signals.values()) and _prior_msg_count >= 4:
             fallback = _extract_contact_from_text(request.question)
             if fallback:
                 logger.info(f"Fallback signal extraction: {list(fallback.keys())}")
@@ -396,7 +440,11 @@ async def submit_feedback(request: FeedbackRequest):
     Save user feedback (thumbs up/down) for a message.
     Public endpoint (public_api: true) — intentionally unauthenticated for customer access.
     """
-    _validate_public_request(request.session_id, request.answer or "")
+    _validate_public_request(request.session_id, request.question)
+    if len(request.answer or "") > 5000:
+        raise HTTPException(status_code=400, detail="Invalid input")
+    if len(request.feedback_text or "") > 1000:
+        raise HTTPException(status_code=400, detail="Invalid input")
     try:
         feedback_id = await firestore_service.save_feedback(
             session_id=request.session_id,
@@ -452,7 +500,7 @@ async def list_conversations(limit: int = Query(default=50, ge=1, le=500), user:
 
 
 @app.get("/api/admin/conversations/export")
-async def export_conversations(limit: int = Query(default=50, ge=1, le=500), user: str = Depends(require_corp)):
+async def export_conversations(limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp)):
     """Export full conversation sessions (with lead data) as a downloadable JSON file."""
     import json as _json
     from fastapi.responses import Response
@@ -602,6 +650,17 @@ async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_cor
 @app.put("/api/admin/config/prompts")
 async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
+    # Validate size to prevent excessively large prompt uploads
+    if len(request.core_prompt.encode()) > _MAX_PROMPT_BYTES:
+        raise HTTPException(status_code=400, detail="core_prompt exceeds maximum allowed size")
+    # Validate phase keys to reject unknown/injected phase names
+    from backend.conversation_router import ConversationPhase as _CP
+    valid_phases = {p.value for p in _CP}
+    for phase_key, phase_content in (request.phase_prompts or {}).items():
+        if phase_key not in valid_phases:
+            raise HTTPException(status_code=400, detail=f"Unknown phase: {phase_key}")
+        if len((phase_content or "").encode()) > _MAX_PROMPT_BYTES:
+            raise HTTPException(status_code=400, detail=f"Phase prompt {phase_key} exceeds maximum allowed size")
     try:
         logger.warning(f"CONFIG_CHANGE: {user} updated core prompt and phase prompts")
         storage.save_prompts(request.core_prompt, request.phase_prompts)
