@@ -12,7 +12,6 @@ import asyncio
 import re
 import time
 import uuid
-from collections import defaultdict
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -21,10 +20,20 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+_CORP_EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@getnexar\.com$')
+
+
 def require_corp(request: Request) -> str:
-    """Dependency: only allow verified corp users (@getnexar.com) via sidecar-set X-Nexar-User."""
+    """Dependency: only allow verified corp users (@getnexar.com) via sidecar-set X-Nexar-User.
+
+    The platform sidecar injects X-Nexar-User after verifying the corp identity token,
+    so this header is authoritative for authenticated corp sessions. The application
+    adds a defense-in-depth layer by validating the full email format (not just the
+    domain suffix) to reject malformed or crafted values even if the sidecar is
+    misconfigured.
+    """
     user = request.headers.get("X-Nexar-User", "")
-    if not user.endswith("@getnexar.com"):
+    if not _CORP_EMAIL_RE.match(user):
         raise HTTPException(status_code=403, detail="Corp access required")
     return user
 
@@ -87,20 +96,10 @@ _ALLOWED_ORIGINS = ["https://fleet-sales-agent.corp.nexars.ai", "https://fleet.g
 # Single-level subdomain only (no dots allowed) to prevent subdomain-takeover escalation
 _ORIGIN_PATTERN = re.compile(r'^https://[a-z0-9-]+\.(?:nexar\.app|getnexar\.com)$')
 
-# Simple per-session rate limiter: max 30 messages per 60-second window
-# Prevents automated lead injection and CRM pollution via the chat endpoint.
+# Per-session rate limit: max 30 messages per 60-second window.
+# Implemented via Firestore so it is effective across all Cloud Run instances.
 _RATE_LIMIT_WINDOW = 60
 _RATE_LIMIT_MAX = 30
-_rate_windows: dict = defaultdict(list)
-
-def _check_chat_rate_limit(session_id: str) -> bool:
-    now = time.monotonic()
-    cutoff = now - _RATE_LIMIT_WINDOW
-    _rate_windows[session_id] = [t for t in _rate_windows[session_id] if t > cutoff]
-    if len(_rate_windows[session_id]) >= _RATE_LIMIT_MAX:
-        return False
-    _rate_windows[session_id].append(now)
-    return True
 _extra = [
     o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",")
     if o.strip() and _ORIGIN_PATTERN.match(o.strip())
@@ -255,6 +254,10 @@ def _build_chatbot_summary(lead: dict, messages: list) -> str:
         if not content:
             continue
         label = "Customer" if role == "user" else "Alex"
+        # Strip injection patterns from both user and AI-generated content before
+        # including in the HubSpot CRM record — prevents prompt-injected text from
+        # being stored in CRM if the LLM was manipulated into outputting it.
+        content = ChatService._sanitize_prompt(content)
         transcript_lines.append(f"[{label}] {_redact_transcript_pii(content)}")
 
     transcript = "\n".join(transcript_lines)
@@ -276,7 +279,10 @@ async def chat(request: ChatRequest):
     Also extracts lead signals and triggers Slack notifications when appropriate.
     """
     _validate_public_request(request.session_id, request.question)
-    if not _check_chat_rate_limit(request.session_id):
+    window_key = int(time.time() // _RATE_LIMIT_WINDOW)
+    if not await firestore_service.check_and_increment_rate_limit(
+        request.session_id, window_key, _RATE_LIMIT_MAX
+    ):
         raise HTTPException(status_code=429, detail="Too many requests")
     try:
         # Sanitize user input to prevent prompt injection

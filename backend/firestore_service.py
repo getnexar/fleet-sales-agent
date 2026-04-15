@@ -339,3 +339,37 @@ class FirestoreService:
             })
         except Exception as e:
             logger.error(f"Failed to update feedback triage: {e}")
+
+    # ─── Distributed Rate Limiting ────────────────────────────────────────────
+
+    async def check_and_increment_rate_limit(
+        self,
+        session_id: str,
+        window_key: int,
+        max_count: int,
+    ) -> bool:
+        """
+        Distributed per-session rate limit using Firestore atomic increment.
+        Effective across all Cloud Run instances (unlike in-memory dicts).
+        Returns True if the request is within the limit, False if exceeded.
+
+        Documents are stored in fleet_rate_limits/{session_id}_{window_key}
+        and are naturally sparse (one per session per time window).
+        """
+        import asyncio
+        doc_id = f"{session_id}_{window_key}"
+        doc_ref = self.db.collection("fleet_rate_limits").document(doc_id)
+
+        def _increment_and_check() -> int:
+            # Atomic server-side increment — consistent across concurrent instances
+            doc_ref.set({"count": firestore.Increment(1), "window": window_key}, merge=True)
+            snap = doc_ref.get()
+            return snap.get("count") or 1
+
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(None, _increment_and_check)
+            return count <= max_count
+        except Exception as e:
+            logger.warning(f"Rate limit check failed for session {session_id[:8]}: {e} — allowing request")
+            return True  # Fail open: don't block users if Firestore is unavailable
