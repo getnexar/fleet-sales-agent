@@ -115,6 +115,14 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Nexar-User", "X-Nexar-User-Type"],
 )
 
+# Security: warn if prompt admin restriction is not configured.
+# PROMPT_ADMIN_EMAILS should be set in production to limit who can edit agent prompts.
+if not os.environ.get("PROMPT_ADMIN_EMAILS"):
+    logger.warning(
+        "SECURITY: PROMPT_ADMIN_EMAILS is not set. All corp users can edit agent prompts. "
+        "Set this env var to a comma-separated list of allowed admin emails."
+    )
+
 # Allow fleet.getnexar.com to embed this app in an iframe (for GTM widget injection).
 # frame-ancestors takes precedence over X-Frame-Options in modern browsers.
 @app.middleware("http")
@@ -301,7 +309,11 @@ async def chat(request: ChatRequest):
             if _role in ("user", "assistant") and _content:
                 clean_history.append(_Message(role=_role, content=_content))
 
-        # Get AI response
+        # Get AI response.
+        # Role separation: clean_question is appended to the Anthropic messages array
+        # as {"role": "user", "content": clean_question} inside ChatService.get_response(),
+        # and is never interpolated into the system prompt string.
+        # See ChatService.get_response() in backend/chat_service.py for the full implementation.
         result = await chat_service.get_response(
             question=clean_question,
             conversation_history=clean_history,
@@ -719,6 +731,13 @@ _PROMPT_FORBIDDEN_PATTERNS = [
     re.compile(r'<script[^>]*>', re.IGNORECASE),  # embedded script tags
     re.compile(r'javascript\s*:', re.IGNORECASE),  # JS protocol handlers
     re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'),  # non-printable control characters
+    # Prompt injection: classic override patterns that could subvert the sales agent
+    re.compile(r'ignore\s+(all\s+)?(previous|prior|above)\s+instructions?', re.IGNORECASE),
+    re.compile(r'disregard\s+(all\s+)?(previous|prior|above)\s+instructions?', re.IGNORECASE),
+    re.compile(r'forget\s+(all\s+)?(previous|prior|above)\s+instructions?', re.IGNORECASE),
+    re.compile(r'system\s+override', re.IGNORECASE),
+    re.compile(r'you\s+are\s+now\s+(a\s+)?different', re.IGNORECASE),
+    re.compile(r'new\s+persona\s*:', re.IGNORECASE),
 ]
 
 

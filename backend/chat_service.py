@@ -312,6 +312,12 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         """
         Get AI response for user question.
         Returns dict with answer, follow_up, cta_type, and lead_signals.
+
+        Security: user question is passed to the Anthropic API as a separate user-role
+        message in the messages array ({"role": "user", "content": clean_question}) and
+        is never interpolated into the system prompt string. The system prompt is passed
+        via the system= parameter of client.messages.create(), maintaining strict role
+        separation between instructions and user-supplied data.
         """
         # Detect conversation phase and build phase-aware system prompt
         phase = detect_phase(conversation_history)
