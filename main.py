@@ -281,7 +281,11 @@ async def chat(request: ChatRequest):
             conversation_history=clean_history,
         )
 
-        answer = result.get("answer", "")
+        # Sanitize AI-generated answer before returning to client.
+        # Caps length and strips control characters; does not block content — the
+        # _filter_output() call in chat_service already logs suspicious patterns.
+        _raw_answer = result.get("answer", "") or ""
+        answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
         follow_up = result.get("follow_up")
         cta_type = result.get("cta_type")
         # Validate AI-extracted lead signals against expected formats/ranges.
@@ -422,7 +426,7 @@ async def chat(request: ChatRequest):
                             # Body not logged to avoid potential PII echo; check portal/form ID config
                             logger.error(
                                 f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
-                                f"form submission rejected — verify HUBSPOT_PORTAL_ID and HUBSPOT_FORM_ID are correct"
+                                f"form submission rejected — check integration configuration"
                             )
                         else:
                             # Transient failure — network issue or rate limit, may succeed on retry
@@ -441,7 +445,7 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"Chat error: {e}")
+        logger.error(f"Chat error: {type(e).__name__}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -512,14 +516,15 @@ async def list_conversations(limit: int = Query(default=50, ge=1, le=500), user:
 
 
 @app.get("/api/admin/conversations/export")
-async def export_conversations(limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp_export)):
+async def export_conversations(request: Request, limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp_export)):
     """Export full conversation sessions (with lead data) as a downloadable JSON file."""
     import json as _json
     from fastapi.responses import Response
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
-    logger.warning(f"DATA_EXPORT: {user} exported up to {limit} conversation records ({len(summaries)} found)")
+    client_ip = request.client.host if request.client else "unknown"
+    logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
         detail = await firestore_service.get_conversation(s["session_id"])
         if detail:
@@ -543,6 +548,8 @@ async def export_conversations(limit: int = Query(default=25, ge=1, le=100), use
 @app.get("/api/admin/conversations/{session_id}")
 async def get_conversation(session_id: str, user: str = Depends(require_corp)):
     """Get full conversation history and associated lead data."""
+    if not _UUID_RE.match(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
     conversation = await firestore_service.get_conversation(session_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -563,6 +570,8 @@ async def rate_conversation(
     request: ConversationRatingRequest,
     user: str = Depends(require_corp),
 ):
+    if not _UUID_RE.match(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session ID")
     """Rate a conversation and (for thumbs_down) trigger async Gemini triage."""
     await firestore_service.rate_conversation(
         session_id=session_id,
@@ -590,9 +599,11 @@ async def rate_conversation(
 
             async def _run_triage():
                 try:
+                    # Sanitize user-originated content before passing to triage LLM
+                    # to prevent stored prompt injection from manipulating triage results.
                     result = await chat_service.triage_feedback(
-                        question=request.question,
-                        answer=request.answer,
+                        question=chat_service._sanitize_input(request.question),
+                        answer=chat_service._sanitize_input(request.answer),
                         admin_notes=request.notes,
                         faq_titles=faq_titles,
                         phase_names=phase_names,
@@ -638,8 +649,15 @@ async def get_config(user: str = Depends(require_corp)):
     return config
 
 
+class FaqEntry(BaseModel):
+    question: str = Field(max_length=500)
+    answer: str = Field(max_length=5000)
+    category: str = Field(default="", max_length=100)
+    source: str = Field(default="", max_length=200)
+
+
 class ConfigFaqsUpdate(BaseModel):
-    faqs: list
+    faqs: list[FaqEntry]
 
 
 class ConfigPromptsUpdate(BaseModel):
@@ -685,11 +703,15 @@ def _validate_prompt_content(content: str, field_name: str) -> None:
 async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
     # Explicit change-approval gate: caller must acknowledge with a reason and their own email.
-    # This prevents unintended changes and provides a lightweight approval record in logs.
     if len(request.change_reason.strip()) < 10:
         raise HTTPException(status_code=400, detail="change_reason is required (minimum 10 characters)")
     if request.confirmed_by.strip().lower() != user.lower():
         raise HTTPException(status_code=400, detail="confirmed_by must match your authenticated user email")
+    # Restrict prompt writes to designated admins (set PROMPT_ADMIN_EMAILS env var,
+    # comma-separated). If unset, all corp users are allowed (backwards-compatible default).
+    _prompt_admins = {e.strip() for e in os.environ.get("PROMPT_ADMIN_EMAILS", "").split(",") if e.strip()}
+    if _prompt_admins and user.lower() not in {e.lower() for e in _prompt_admins}:
+        raise HTTPException(status_code=403, detail="Prompt updates restricted to designated admins")
     _validate_prompt_content(request.core_prompt, "core_prompt")
     # Validate phase keys to reject unknown/injected phase names
     from backend.conversation_router import ConversationPhase as _CP
