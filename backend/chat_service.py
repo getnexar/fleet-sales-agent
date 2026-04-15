@@ -220,6 +220,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         """
         Sanitize user input to prevent prompt injection.
         Strips common injection patterns while preserving legitimate content.
+        Logs when patterns are neutralized so suspicious sessions can be monitored.
         """
         if not text:
             return text
@@ -227,7 +228,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
         # Truncate to max allowed length (already validated at API layer, but belt-and-suspenders)
         text = text[:2000]
-        # Strip prompt injection markers
+        # Strip prompt injection markers and log detections for alerting
         injection_patterns = [
             r'(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?',
             r'(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?',
@@ -237,10 +238,37 @@ Respond with ONLY valid JSON (no markdown, no code fences):
             r'(?i)<\s*system\s*>',
             r'(?i)###\s*system',
             r'(?i)###\s*instruction',
+            r'(?i)system\s+override',
+            r'(?i)prompt\s+injection',
         ]
         for pattern in injection_patterns:
-            text = re.sub(pattern, '[removed]', text)
+            cleaned, count = re.subn(pattern, '[removed]', text)
+            if count:
+                logger.warning(
+                    f"SECURITY: Prompt injection pattern neutralized ({count} instance(s)) — pattern: {pattern[:50]}"
+                )
+            text = cleaned
         return text.strip()
+
+    @staticmethod
+    def _filter_output(answer: str) -> str:
+        """
+        Scan AI output for prompt injection success indicators and system prompt leakage.
+        Logs warnings so suspicious outputs are visible in monitoring dashboards.
+        The response is still returned — filtering is detect-and-alert, not block.
+        """
+        leak_patterns = [
+            (r'(?i)my system prompt', "system prompt reference"),
+            (r'(?i)my instructions (say|are|tell me to)', "instruction disclosure"),
+            (r'(?i)i(\'ve| have) been instructed to', "instruction disclosure"),
+            (r'(?i)ignore (previous|all|prior) instructions', "injection success indicator"),
+            (r'CORE_PROMPT_TEMPLATE', "internal template name leaked"),
+            (r'(?i)## current conversation phase', "system prompt section leaked"),
+        ]
+        for pattern, label in leak_patterns:
+            if re.search(pattern, answer):
+                logger.warning(f"SECURITY: AI output filter triggered — {label} detected in response")
+        return answer
 
     async def get_response(
         self,
@@ -328,6 +356,8 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                         parsed["answer"] = stripped + f"\n\n{fallback}"
 
                 parsed["_phase"] = phase.value
+                # Output filter: log if response shows signs of injection success or leakage
+                self._filter_output(parsed.get("answer", ""))
                 return parsed
 
             except json.JSONDecodeError:

@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Literal
 from pydantic import BaseModel
 
 
@@ -61,8 +62,13 @@ app = FastAPI(
 )
 
 _ALLOWED_ORIGINS = ["https://fleet-sales-agent.corp.nexars.ai", "https://fleet.getnexar.com"]
-# Local development: add origins via EXTRA_CORS_ORIGINS env var (comma-separated)
-_extra = [o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+# Local development: add origins via EXTRA_CORS_ORIGINS env var (comma-separated).
+# Only origins matching trusted domains are accepted — others are silently ignored.
+_ORIGIN_PATTERN = re.compile(r'^https://[\w.-]+\.(?:nexar\.app|getnexar\.com)$')
+_extra = [
+    o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",")
+    if o.strip() and _ORIGIN_PATTERN.match(o.strip())
+]
 if _extra:
     _ALLOWED_ORIGINS += _extra
 
@@ -246,12 +252,16 @@ async def chat(request: ChatRequest):
         # Fallback: if Claude returned non-JSON (empty lead_signals) during CLOSE_QUOTE,
         # extract contact info directly from the user's raw message so the Firestore
         # upsert still happens and the HubSpot gate can fire.
+        # Pre-fetch existing lead to avoid overwriting already-confirmed contact data
+        # (prevents a bad actor from injecting a third party's contact details).
+        _existing_lead = await firestore_service.get_lead(request.session_id)
         if phase_str == "CLOSE_QUOTE" and not any(lead_signals.values()):
             fallback = _extract_contact_from_text(request.question)
             if fallback:
                 logger.info(f"Fallback signal extraction: {list(fallback.keys())}")
                 for k, v in fallback.items():
-                    if not lead_signals.get(k):
+                    # Only apply if the field isn't already confirmed in Firestore
+                    if not lead_signals.get(k) and not (_existing_lead or {}).get(k):
                         lead_signals[k] = v
 
         if any(lead_signals.values()) or phase_str == "CLOSE_QUOTE":
@@ -357,10 +367,11 @@ async def chat(request: ChatRequest):
                             logger.info(f"HubSpot contact submitted for session {request.session_id}")
                         elif _hr.status_code in (400, 403, 404, 422):
                             # Permanent failure — misconfigured portal/form ID or invalid field data
-                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {request.session_id}: {_hr.text[:200]}")
+                            # Response body not logged to avoid potential PII echo in error responses
+                            logger.error(f"HubSpot permanent error {_hr.status_code} for session {request.session_id}")
                         else:
                             # Transient failure — network issue or rate limit, may succeed on retry
-                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {request.session_id}: {_hr.text[:200]}")
+                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {request.session_id}")
                 except Exception as hs_err:
                     logger.error(f"HubSpot error for session {request.session_id}: {hs_err}")
                     # Fall through — don't break the conversation on HubSpot failure
@@ -408,6 +419,7 @@ async def submit_feedback(request: FeedbackRequest):
 @app.post("/api/admin/reload-config")
 async def reload_config(user: str = Depends(require_corp)):
     """Force reload of FAQ/instructions from GCS (no redeployment needed)."""
+    logger.warning(f"CONFIG_CHANGE: {user} triggered config cache reload")
     storage.reload()
     return {"status": "ok", "message": "Config cache cleared. Will reload from GCS on next request."}
 
@@ -447,6 +459,7 @@ async def export_conversations(limit: int = Query(default=50, ge=1, le=500), use
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
+    logger.warning(f"DATA_EXPORT: {user} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
         detail = await firestore_service.get_conversation(s["session_id"])
         if detail:
@@ -477,7 +490,7 @@ async def get_conversation(session_id: str, user: str = Depends(require_corp)):
 
 
 class ConversationRatingRequest(BaseModel):
-    rating: str  # "thumbs_up" | "thumbs_down"
+    rating: Literal["thumbs_up", "thumbs_down"]
     notes: str = ""
     # For thumbs_down: include a representative Q&A pair to run triage against
     question: str = ""
@@ -578,6 +591,7 @@ class ConfigPromptsUpdate(BaseModel):
 async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_corp)):
     """Overwrite FAQ JSON in GCS and reload cache."""
     try:
+        logger.warning(f"CONFIG_CHANGE: {user} updated FAQs ({len(request.faqs)} entries)")
         storage.save_faqs(request.faqs)
         return {"status": "ok", "message": f"Saved {len(request.faqs)} FAQs and reloaded cache."}
     except RuntimeError as e:
@@ -589,6 +603,7 @@ async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_cor
 async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
     try:
+        logger.warning(f"CONFIG_CHANGE: {user} updated core prompt and phase prompts")
         storage.save_prompts(request.core_prompt, request.phase_prompts)
         return {"status": "ok", "message": "Prompts saved and cache reloaded."}
     except RuntimeError as e:
