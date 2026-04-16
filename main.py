@@ -9,15 +9,19 @@ import logging
 from pathlib import Path
 
 import asyncio
+import hashlib
 import re
 import time
+import unicodedata
 import uuid
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Literal
 from pydantic import BaseModel, Field
+import httpx as _httpx
 
 
 _CORP_EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@getnexar\.com$')
@@ -100,6 +104,7 @@ _ORIGIN_PATTERN = re.compile(r'^https://[a-z0-9-]+\.(?:nexar\.app|getnexar\.com)
 # Implemented via Firestore so it is effective across all Cloud Run instances.
 _RATE_LIMIT_WINDOW = 60
 _RATE_LIMIT_MAX = 30
+_IP_RATE_LIMIT_MAX = int(os.environ.get("IP_RATE_LIMIT_MAX", "120"))
 _extra = [
     o.strip() for o in os.environ.get("EXTRA_CORS_ORIGINS", "").split(",")
     if o.strip() and _ORIGIN_PATTERN.match(o.strip())
@@ -114,14 +119,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Content-Type", "X-Nexar-User", "X-Nexar-User-Type"],
 )
-
-# Security: warn if prompt admin restriction is not configured.
-# PROMPT_ADMIN_EMAILS should be set in production to limit who can edit agent prompts.
-if not os.environ.get("PROMPT_ADMIN_EMAILS"):
-    logger.warning(
-        "SECURITY: PROMPT_ADMIN_EMAILS is not set. All corp users can edit agent prompts. "
-        "Set this env var to a comma-separated list of allowed admin emails."
-    )
 
 # Allow fleet.getnexar.com to embed this app in an iframe (for GTM widget injection).
 # frame-ancestors takes precedence over X-Frame-Options in modern browsers.
@@ -139,6 +136,7 @@ chat_service = ChatService(storage=storage)
 firestore_service = FirestoreService()
 slack_service = SlackService()
 docusign_service = DocuSignService()
+SLACK_NOTIFICATIONS_ENABLED = os.environ.get("SLACK_NOTIFICATIONS_ENABLED", "true").lower() == "true"
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -152,6 +150,9 @@ HUBSPOT_REQUIRED_FIELDS = {"contact_name", "contact_email", "contact_phone", "bu
 # Form: inbound_smb_fleets
 HUBSPOT_PORTAL_ID = os.environ.get("HUBSPOT_PORTAL_ID", "")
 HUBSPOT_FORM_ID = os.environ.get("HUBSPOT_FORM_ID", "")
+HUBSPOT_PAGE_URI = os.environ.get("HUBSPOT_PAGE_URI", "")
+HUBSPOT_RETRY_LIMIT = int(os.environ.get("HUBSPOT_RETRY_LIMIT", "3"))
+HUBSPOT_RETRY_COOLDOWN_SECONDS = int(os.environ.get("HUBSPOT_RETRY_COOLDOWN_SECONDS", "900"))
 
 _SUBSCRIPTION_LABELS = {
     "no-contract": "$25/mo (no contract)",
@@ -172,6 +173,24 @@ _EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
 
 # Maximum byte size for admin-managed prompt content
 _MAX_PROMPT_BYTES = 50_000
+
+_LEAD_TEXT_LIMITS = {
+    "contact_name": 100,
+    "business_name": 200,
+    "industry": 100,
+    "pain_points": 300,
+    "camera_model": 50,
+    "memory_option": 20,
+    "subscription_plan": 30,
+    "cta_type": 20,
+    "shipping_address": 300,
+    "billing_email": 254,
+}
+
+_TRUSTED_PAGE_ORIGINS = {
+    "https://fleet.getnexar.com",
+    "https://fleet-sales-agent.corp.nexars.ai",
+}
 
 
 def _validate_lead_signals(signals: dict) -> dict:
@@ -200,14 +219,115 @@ def _validate_lead_signals(signals: dict) -> dict:
                     validated[k] = fs
             except (ValueError, TypeError):
                 pass
+        elif k == "num_cameras":
+            try:
+                count = int(float(str(v)))
+                if 1 <= count <= 100_000:
+                    validated[k] = count
+            except (ValueError, TypeError):
+                pass
+        elif k == "camera_model":
+            if v in {"Beam 2 Mini", "Beam 2", "Nexar One"}:
+                validated[k] = v
+        elif k == "memory_option":
+            if v in {"128GB", "256GB"}:
+                validated[k] = v
+        elif k == "subscription_plan":
+            if v in _SUBSCRIPTION_LABELS:
+                validated[k] = v
+        elif k == "order_intent":
+            if v in {"HIGH", "MEDIUM", "LOW"}:
+                validated[k] = v
         elif k in ("contact_name", "business_name"):
-            if isinstance(v, str) and 1 <= len(v.strip()) <= 200:
-                validated[k] = v.strip()
+            if isinstance(v, str) and v.strip():
+                # Normalize, strip control characters, remove known injection markers,
+                # and bound name fields before storage/downstream propagation.
+                _clean = _sanitize_downstream_text(v, _LEAD_TEXT_LIMITS[k])
+                if _clean:
+                    validated[k] = _clean
         elif isinstance(v, str):
-            validated[k] = v[:500]
+            # Normalize, strip control characters and injection override patterns,
+            # then apply field-specific length limits before Firestore/Slack/HubSpot use.
+            _clean = _sanitize_downstream_text(v, _LEAD_TEXT_LIMITS.get(k, 200))
+            if _clean:
+                validated[k] = _clean
         else:
             validated[k] = v
     return validated
+
+
+def _sanitize_downstream_text(value: str, max_len: int) -> str:
+    """
+    Normalize and bound LLM-originated text before it leaves the app boundary.
+    This is used for Firestore lead fields, Slack notifications, and HubSpot form
+    payloads so a prompt-injected extraction cannot propagate long or disguised
+    instruction text into downstream systems.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    for pattern in _PROMPT_FORBIDDEN_PATTERNS:
+        text = pattern.sub('[removed]', text)
+    return text[:max_len].strip()
+
+
+def _sanitize_lead_for_downstream(lead: dict) -> dict:
+    """Apply field-specific bounds to all lead strings before Slack/HubSpot use."""
+    clean = {}
+    for key, value in (lead or {}).items():
+        if isinstance(value, str):
+            clean[key] = _sanitize_downstream_text(value, _LEAD_TEXT_LIMITS.get(key, 200))
+        else:
+            clean[key] = value
+    return clean
+
+
+def _client_rate_limit_key(request: Request) -> str:
+    """Hash client IP into a stable, non-reversible key for public endpoint limits."""
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    client_ip = forwarded_for.split(",")[0].strip()
+    if not client_ip and request.client:
+        client_ip = request.client.host or ""
+    digest = hashlib.sha256(client_ip.encode("utf-8")).hexdigest()[:24]
+    return f"ip_{digest}"
+
+
+def _hubspot_page_uri(request: Request) -> str:
+    """Prefer configured/observed trusted public page context over internal app URL."""
+    if HUBSPOT_PAGE_URI:
+        return HUBSPOT_PAGE_URI[:500]
+
+    referer = request.headers.get("Referer", "")
+    for trusted_origin in _TRUSTED_PAGE_ORIGINS:
+        if referer.startswith(trusted_origin):
+            return referer[:500]
+
+    origin = request.headers.get("Origin", "")
+    if origin in _TRUSTED_PAGE_ORIGINS:
+        return origin
+
+    return "https://fleet.getnexar.com"
+
+
+def _hubspot_retry_due(lead: dict) -> bool:
+    """Return False while a prior transient HubSpot failure is cooling down."""
+    try:
+        return time.time() >= float((lead or {}).get("hubspot_next_retry_at") or 0)
+    except (TypeError, ValueError):
+        return True
+
+
+def _hubspot_failure_update(lead: dict, *, permanent: bool = False) -> dict:
+    retry_count = int((lead or {}).get("hubspot_retry_count") or 0) + 1
+    update = {
+        "hubspot_retry_count": retry_count,
+        "hubspot_last_failure_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if permanent or retry_count >= HUBSPOT_RETRY_LIMIT:
+        update["hubspot_permanently_failed"] = True
+    else:
+        update["hubspot_next_retry_at"] = time.time() + HUBSPOT_RETRY_COOLDOWN_SECONDS
+    return update
 
 
 def _redact_sensitive(text: str) -> str:
@@ -235,6 +355,7 @@ _TRANSCRIPT_CHAR_LIMIT = 3000
 def _build_chatbot_summary(lead: dict, messages: list) -> str:
     """Build the structured summary + truncated transcript for HubSpot chatbot_summary field.
     Contact PII is redacted from the transcript — it's already submitted in structured fields."""
+    lead = _sanitize_lead_for_downstream(lead)
     lines = ["=== LEAD SUMMARY ==="]
 
     if lead.get("fleet_size"):
@@ -265,7 +386,7 @@ def _build_chatbot_summary(lead: dict, messages: list) -> str:
         # Strip injection patterns from both user and AI-generated content before
         # including in the HubSpot CRM record — prevents prompt-injected text from
         # being stored in CRM if the LLM was manipulated into outputting it.
-        content = ChatService._sanitize_prompt(content)
+        content = _sanitize_downstream_text(content, 1000)
         transcript_lines.append(f"[{label}] {_redact_transcript_pii(content)}")
 
     transcript = "\n".join(transcript_lines)
@@ -280,7 +401,7 @@ async def health_check():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """
     Handle a chat message and return an AI-generated response.
     Public endpoint (public_api: true) — intentionally unauthenticated for customer access.
@@ -290,6 +411,10 @@ async def chat(request: ChatRequest):
     window_key = int(time.time() // _RATE_LIMIT_WINDOW)
     if not await firestore_service.check_and_increment_rate_limit(
         request.session_id, window_key, _RATE_LIMIT_MAX
+    ):
+        raise HTTPException(status_code=429, detail="Too many requests")
+    if not await firestore_service.check_and_increment_rate_limit(
+        _client_rate_limit_key(http_request), window_key, _IP_RATE_LIMIT_MAX
     ):
         raise HTTPException(status_code=429, detail="Too many requests")
     try:
@@ -333,6 +458,8 @@ async def chat(request: ChatRequest):
         answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
         follow_up = result.get("follow_up")
         cta_type = result.get("cta_type")
+        if cta_type not in {"quote", "info", "demo", "trial", None}:
+            cta_type = None
         # Validate AI-extracted lead signals against expected formats/ranges.
         # Prevents prompt injection from producing arbitrary contact data in the CRM.
         lead_signals = _validate_lead_signals(result.get("lead_signals", {}) or {})
@@ -387,11 +514,14 @@ async def chat(request: ChatRequest):
 
         if current_lead:
             # Check if we have enough info to notify Slack
-            if not current_lead.get("slack_notified"):
+            if SLACK_NOTIFICATIONS_ENABLED and not current_lead.get("slack_notified"):
                 collected = {f for f in LEAD_NOTIFY_FIELDS if current_lead.get(f)}
                 if collected >= LEAD_NOTIFY_FIELDS:
+                    # Sanitize free-text fields before including in Slack notification
+                    # to prevent stored prompt injection from appearing in team channels.
+                    _slack_lead = _sanitize_lead_for_downstream(current_lead)
                     sent = await slack_service.notify_new_lead(
-                        request.session_id, current_lead
+                        request.session_id, _slack_lead
                     )
                     if sent:
                         await firestore_service.mark_lead_slack_notified(request.session_id)
@@ -399,8 +529,9 @@ async def chat(request: ChatRequest):
                 elif lead_signals.get("order_intent") == "HIGH" or (
                     int(current_lead.get("fleet_size") or 0) >= 50
                 ):
+                    _slack_lead = _sanitize_lead_for_downstream(current_lead)
                     await slack_service.notify_high_intent_lead(
-                        request.session_id, current_lead
+                        request.session_id, _slack_lead
                     )
 
             # Log what's missing so we can debug gate failures
@@ -414,26 +545,39 @@ async def chat(request: ChatRequest):
                 phase_str == "CLOSE_QUOTE"
                 and not current_lead.get("hubspot_submitted")
                 and not current_lead.get("hubspot_permanently_failed")
+                and _hubspot_retry_due(current_lead)
                 and all(current_lead.get(f) for f in HUBSPOT_REQUIRED_FIELDS)
                 and HUBSPOT_PORTAL_ID
                 and HUBSPOT_FORM_ID
             ):
                 try:
-                    import httpx as _httpx
-
                     # Build summary + transcript from Firestore conversation
                     convo = await firestore_service.get_conversation(request.session_id)
                     messages_for_summary = (convo or {}).get("messages", [])
-                    chatbot_summary = _build_chatbot_summary(current_lead, messages_for_summary)
+                    safe_lead = _sanitize_lead_for_downstream(current_lead)
+                    if not all(safe_lead.get(f) for f in HUBSPOT_REQUIRED_FIELDS):
+                        logger.warning(
+                            f"HubSpot skipped after downstream sanitization removed required field "
+                            f"for session {_sid(request.session_id)}"
+                        )
+                        return ChatResponse(
+                            answer=answer,
+                            session_id=request.session_id,
+                            suggested_follow_ups=follow_ups,
+                            lead_collected=lead_collected,
+                            cta_type=cta_type,
+                            quote_url=quote_url,
+                        )
+                    chatbot_summary = _build_chatbot_summary(safe_lead, messages_for_summary)
 
                     # Split full name into first / last; enforce field length limits
                     # before transmission to prevent oversized data reaching HubSpot.
-                    name_parts = (current_lead.get("contact_name") or "").split()
+                    name_parts = (safe_lead.get("contact_name") or "").split()
                     firstname = (name_parts[0] if name_parts else "")[:100]
                     lastname = (" ".join(name_parts[1:]) if len(name_parts) > 1 else "")[:100]
-                    hs_email = (current_lead.get("contact_email") or "")[:254]
-                    hs_phone = (current_lead.get("contact_phone") or "")[:20]
-                    hs_company = (current_lead.get("business_name") or "")[:200]
+                    hs_email = (safe_lead.get("contact_email") or "")[:254]
+                    hs_phone = (safe_lead.get("contact_phone") or "")[:20]
+                    hs_company = (safe_lead.get("business_name") or "")[:200]
 
                     hs_fields = [
                         {"name": "firstname",           "value": firstname},
@@ -445,16 +589,16 @@ async def chat(request: ChatRequest):
                         {"name": "chatbot_summary",     "value": chatbot_summary},
                     ]
                     # how_many_vehicles_ = fleet size; fall back to num_cameras if not separately captured
-                    vehicle_count = current_lead.get("fleet_size") or current_lead.get("num_cameras")
+                    vehicle_count = safe_lead.get("fleet_size") or safe_lead.get("num_cameras")
                     hs_fields.append({"name": "how_many_vehicles_", "value": str(vehicle_count)})
                     # Optional fields
-                    if current_lead.get("industry"):
-                        hs_fields.append({"name": "industry", "value": current_lead["industry"]})
+                    if safe_lead.get("industry"):
+                        hs_fields.append({"name": "industry", "value": safe_lead["industry"]})
 
                     hubspot_payload = {
                         "fields": hs_fields,
                         "context": {
-                            "pageUri": "https://fleet-sales-agent.corp.nexars.ai",
+                            "pageUri": _hubspot_page_uri(http_request),
                             "pageName": "Fleet Sales Chat",
                         },
                     }
@@ -467,7 +611,7 @@ async def chat(request: ChatRequest):
                         if _hr.status_code in (200, 204):
                             await firestore_service.upsert_lead(request.session_id, {"hubspot_submitted": True})
                             logger.info(f"HubSpot contact submitted for session {_sid(request.session_id)}")
-                        elif _hr.status_code in (400, 403, 404, 422):
+                        elif _hr.status_code in (400, 401, 403, 404, 422):
                             # Permanent failure — misconfigured portal/form ID or invalid field data.
                             # Mark as permanently failed in Firestore so we don't retry on every message.
                             # Body not logged to avoid potential PII echo; check portal/form ID config.
@@ -478,12 +622,48 @@ async def chat(request: ChatRequest):
                                 f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
                                 f"form submission rejected — check integration configuration"
                             )
+                        elif _hr.status_code == 429 or 500 <= _hr.status_code < 600:
+                            # Transient failure — rate limit or HubSpot/server issue.
+                            # Cool down between attempts so every chat turn doesn't call HubSpot.
+                            _update = _hubspot_failure_update(current_lead)
+                            if _update.get("hubspot_permanently_failed"):
+                                logger.error(
+                                    f"HubSpot giving up after {_update['hubspot_retry_count']} transient failures "
+                                    f"for session {_sid(request.session_id)}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"HubSpot transient failure {_hr.status_code} "
+                                    f"(attempt {_update['hubspot_retry_count']}/{HUBSPOT_RETRY_LIMIT}) "
+                                    f"for session {_sid(request.session_id)}"
+                                )
+                            await firestore_service.upsert_lead(request.session_id, _update)
                         else:
-                            # Transient failure — network issue or rate limit, may succeed on retry
-                            logger.warning(f"HubSpot transient failure {_hr.status_code} for session {_sid(request.session_id)}")
+                            await firestore_service.upsert_lead(
+                                request.session_id, {"hubspot_permanently_failed": True}
+                            )
+                            logger.error(
+                                f"HubSpot unexpected permanent error {_hr.status_code} "
+                                f"for session {_sid(request.session_id)}"
+                            )
                 except Exception as hs_err:
-                    logger.error(f"HubSpot error for session {_sid(request.session_id)}: {hs_err}")
-                    # Fall through — don't break the conversation on HubSpot failure
+                    is_transient = isinstance(
+                        hs_err, (_httpx.TimeoutException, _httpx.NetworkError, _httpx.TransportError)
+                    )
+                    _update = _hubspot_failure_update(current_lead, permanent=not is_transient)
+                    if _update.get("hubspot_permanently_failed"):
+                        logger.error(
+                            f"HubSpot giving up after {_update['hubspot_retry_count']} "
+                            f"{'transient exceptions' if is_transient else 'non-transient exception'} "
+                            f"for session {_sid(request.session_id)}: {hs_err}"
+                        )
+                    else:
+                        logger.error(
+                            f"HubSpot transient exception "
+                            f"(attempt {_update['hubspot_retry_count']}/{HUBSPOT_RETRY_LIMIT}) "
+                            f"for session {_sid(request.session_id)}: {hs_err}"
+                        )
+                    await firestore_service.upsert_lead(request.session_id, _update)
 
         return ChatResponse(
             answer=answer,
@@ -659,11 +839,20 @@ async def rate_conversation(
                         faq_titles=faq_titles,
                         phase_names=phase_names,
                     )
+                    # Validate triage output before writing to Firestore.
+                    # Prevents stored prompt injection in the answer field from producing
+                    # arbitrary data in the classification result.
+                    _VALID_TRIAGE_RESOURCES = {"faq", "routing", "prompt", "behavior", "unknown"}
+                    _triage_resource = result.get("resource", "unknown")
+                    if _triage_resource not in _VALID_TRIAGE_RESOURCES:
+                        _triage_resource = "unknown"
+                    _triage_detail = str(result.get("detail") or "")[:500]
+                    _triage_reasoning = str(result.get("reasoning") or "")[:1000]
                     await firestore_service.update_feedback_triage(
                         feedback_id=feedback_id,
-                        triage_resource=result.get("resource", "unknown"),
-                        triage_detail=result.get("detail", ""),
-                        triage_reasoning=result.get("reasoning", ""),
+                        triage_resource=_triage_resource,
+                        triage_detail=_triage_detail,
+                        triage_reasoning=_triage_reasoning,
                     )
                     logger.info(f"Triage complete for {feedback_id}: {result}")
                 except Exception as e:
@@ -765,10 +954,10 @@ async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(requi
         raise HTTPException(status_code=400, detail="change_reason is required (minimum 10 characters)")
     if request.confirmed_by.strip().lower() != user.lower():
         raise HTTPException(status_code=400, detail="confirmed_by must match your authenticated user email")
-    # Restrict prompt writes to designated admins (set PROMPT_ADMIN_EMAILS env var,
-    # comma-separated). If unset, all corp users are allowed (backwards-compatible default).
-    _prompt_admins = {e.strip() for e in os.environ.get("PROMPT_ADMIN_EMAILS", "").split(",") if e.strip()}
-    if _prompt_admins and user.lower() not in {e.lower() for e in _prompt_admins}:
+    # Restrict prompt writes to designated admins only. Fail closed: if PROMPT_ADMIN_EMAILS
+    # is not configured, nobody can edit prompts (prevents silent open-access in new deploys).
+    _prompt_admins = {e.strip().lower() for e in os.environ.get("PROMPT_ADMIN_EMAILS", "").split(",") if e.strip()}
+    if not _prompt_admins or user.lower() not in _prompt_admins:
         raise HTTPException(status_code=403, detail="Prompt updates restricted to designated admins")
     _validate_prompt_content(request.core_prompt, "core_prompt")
     # Validate phase keys to reject unknown/injected phase names
