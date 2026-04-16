@@ -89,7 +89,8 @@
     isOpen = false;
   }
 
-  btn.addEventListener('click', function () {
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
     isOpen ? closeWidget() : openWidget();
   });
 
@@ -97,7 +98,7 @@
 
   /* Close on outside click */
   document.addEventListener('click', function (e) {
-    if (isOpen && !overlay.contains(e.target) && e.target !== btn) {
+    if (isOpen && !overlay.contains(e.target) && !btn.contains(e.target)) {
       closeWidget();
     }
   });
