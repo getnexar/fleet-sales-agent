@@ -67,6 +67,7 @@
   /* ── Floating button ─────────────────────────────────────────────────── */
   var btn = document.createElement('button');
   btn.id = 'nxr-chat-btn';
+  btn.type = 'button';
   btn.setAttribute('aria-label', 'Chat with Nexar Fleet');
   btn.innerHTML =
     '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
@@ -89,12 +90,22 @@
     isOpen = false;
   }
 
-  btn.addEventListener('click', function (e) {
-    e.stopPropagation();
+  function toggleWidget(e) {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    }
     isOpen ? closeWidget() : openWidget();
-  });
+  }
 
-  document.getElementById('nxr-close-btn').addEventListener('click', closeWidget);
+  btn.addEventListener('click', toggleWidget, true);
+
+  document.getElementById('nxr-close-btn').addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeWidget();
+  }, true);
 
   /* Close on outside click */
   document.addEventListener('click', function (e) {
