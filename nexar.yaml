@@ -4,6 +4,11 @@ description: AI-powered sales assistant for Nexar Fleet - answers FAQs, qualifie
 
 # Public access - no authentication required
 public_api: true
+public_routes:
+  - path: /api/chat
+    methods: [POST]
+  - path: /api/feedback
+    methods: [POST]
 
 # Resources
 resources:
