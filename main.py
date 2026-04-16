@@ -560,15 +560,21 @@ async def chat(request: ChatRequest, http_request: Request):
                         request.session_id, _slack_lead
                     )
 
+            wants_sales_followup = (
+                phase_str == "CLOSE_QUOTE"
+                or cta_type == "quote"
+                or lead_signals.get("order_intent") == "HIGH"
+            )
+
             # Log what's missing so we can debug gate failures
-            if phase_str == "CLOSE_QUOTE" and not current_lead.get("hubspot_submitted"):
+            if wants_sales_followup and not current_lead.get("hubspot_submitted"):
                 missing = [f for f in HUBSPOT_REQUIRED_FIELDS if not current_lead.get(f)]
                 if missing:
                     logger.info(f"HubSpot gate: missing fields {missing} for session {_sid(request.session_id)}")
 
             # HubSpot: submit to inbound_smb_fleets form when all required fields present
             if (
-                phase_str == "CLOSE_QUOTE"
+                wants_sales_followup
                 and not current_lead.get("hubspot_submitted")
                 and not current_lead.get("hubspot_permanently_failed")
                 and _hubspot_retry_due(current_lead)
