@@ -129,6 +129,21 @@ class ChatService:
             logger.warning(f"Secret Manager unavailable, falling back to env var: {e}")
             return os.environ.get("ANTHROPIC_API_KEY", "")
 
+    def _parse_model_json(self, response_text: str) -> Dict:
+        """Parse Claude JSON even when it wraps the object in markdown fences."""
+        text = (response_text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'\s*```$', '', text).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                return json.loads(text[start:end + 1])
+            raise
+
     def _build_system_prompt(self, phase: ConversationPhase) -> str:
         faqs = self.storage.get_faqs()
         faq_text = "".join(f"Q: {faq['question']}\nA: {faq['answer']}\n\n" for faq in faqs)
@@ -349,7 +364,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         for attempt in range(max_retries):
             try:
                 response_text = self._call_claude(messages, system_prompt)
-                parsed = json.loads(response_text)
+                parsed = self._parse_model_json(response_text)
 
                 # --- Evaluator pass ---
                 # Run after successful JSON parse, skip on evaluator-triggered re-call
@@ -367,7 +382,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                         )
                         try:
                             retry_text = self._call_claude(messages, hint_prompt)
-                            parsed = json.loads(retry_text)
+                            parsed = self._parse_model_json(retry_text)
                         except (json.JSONDecodeError, Exception) as regen_err:
                             logger.warning(
                                 f"Evaluator regeneration failed ({regen_err}), using original"
@@ -412,7 +427,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                 # Layer 1a: try fixing truncated JSON by appending closing brackets
                 for suffix in ['"}', '"}}', '"}}}']:
                     try:
-                        patched = json.loads(raw + suffix)
+                        patched = self._parse_model_json(raw + suffix)
                         answer_text = patched.get("answer", "")
                         if answer_text:
                             return {
