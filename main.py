@@ -42,6 +42,23 @@ def require_corp(request: Request) -> str:
     return user
 
 
+def _prompt_admin_emails() -> set[str]:
+    return {
+        e.strip().lower()
+        for e in os.environ.get("PROMPT_ADMIN_EMAILS", "").split(",")
+        if e.strip()
+    }
+
+
+def require_prompt_admin(request: Request) -> str:
+    """Restrict sensitive bot configuration to explicitly allowlisted admins."""
+    user = require_corp(request)
+    admins = _prompt_admin_emails()
+    if not admins or user.lower() not in admins:
+        raise HTTPException(status_code=403, detail="Bot config access restricted to designated admins")
+    return user
+
+
 def require_corp_export(request: Request) -> str:
     """
     Stricter dependency for data-export endpoints.
@@ -53,6 +70,11 @@ def require_corp_export(request: Request) -> str:
     if _allowed and user not in _allowed:
         raise HTTPException(status_code=403, detail="Export access restricted to authorised accounts")
     return user
+
+
+def _safe_log_value(value: str, limit: int = 100) -> str:
+    """Remove control characters before writing untrusted header values to audit logs."""
+    return re.sub(r'[\x00-\x1f\x7f]', '', value or '')[:limit]
 
 
 def _sid(session_id: str) -> str:
@@ -151,8 +173,12 @@ HUBSPOT_REQUIRED_FIELDS = {"contact_name", "contact_email", "contact_phone", "bu
 HUBSPOT_PORTAL_ID = os.environ.get("HUBSPOT_PORTAL_ID", "")
 HUBSPOT_FORM_ID = os.environ.get("HUBSPOT_FORM_ID", "")
 HUBSPOT_PAGE_URI = os.environ.get("HUBSPOT_PAGE_URI", "")
-HUBSPOT_RETRY_LIMIT = int(os.environ.get("HUBSPOT_RETRY_LIMIT", "3"))
-HUBSPOT_RETRY_COOLDOWN_SECONDS = int(os.environ.get("HUBSPOT_RETRY_COOLDOWN_SECONDS", "900"))
+if HUBSPOT_PORTAL_ID and not re.fullmatch(r'[0-9]{1,32}', HUBSPOT_PORTAL_ID):
+    raise ValueError("Invalid HUBSPOT_PORTAL_ID")
+if HUBSPOT_FORM_ID and not re.fullmatch(r'[0-9A-Za-z_-]{1,80}', HUBSPOT_FORM_ID):
+    raise ValueError("Invalid HUBSPOT_FORM_ID")
+HUBSPOT_RETRY_LIMIT = max(1, min(10, int(os.environ.get("HUBSPOT_RETRY_LIMIT", "3"))))
+HUBSPOT_RETRY_COOLDOWN_SECONDS = max(60, min(86400, int(os.environ.get("HUBSPOT_RETRY_COOLDOWN_SECONDS", "900"))))
 
 _SUBSCRIPTION_LABELS = {
     "no-contract": "$25/mo (no contract)",
@@ -694,11 +720,11 @@ async def submit_feedback(request: FeedbackRequest):
     try:
         feedback_id = await firestore_service.save_feedback(
             session_id=request.session_id,
-            message_id=request.message_id,
-            question=request.question,
-            answer=request.answer,
+            message_id=_safe_log_value(request.message_id, 100),
+            question=_sanitize_downstream_text(request.question, 2000),
+            answer=_sanitize_downstream_text(request.answer or "", 2000),
             rating=request.rating,
-            feedback_text=request.feedback_text,
+            feedback_text=_sanitize_downstream_text(request.feedback_text or "", 1000),
         )
         if feedback_id:
             return FeedbackResponse(success=True, message="Thanks for your feedback!", feedback_id=feedback_id)
@@ -755,6 +781,7 @@ async def export_conversations(request: Request, limit: int = Query(default=25, 
     summaries = await firestore_service.list_conversations(limit=limit)
     # Use X-Forwarded-For to get real client IP behind Cloud Run / load balancer
     client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown").split(",")[0].strip()
+    client_ip = _safe_log_value(client_ip, 45)
     logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
         detail = await firestore_service.get_conversation(s["session_id"])
@@ -875,7 +902,7 @@ async def get_thumbs_down_feedback(limit: int = Query(default=100, ge=1, le=500)
 # ─── Admin: Config (FAQ + prompts) ───────────────────────────────────────────
 
 @app.get("/api/admin/config")
-async def get_config(user: str = Depends(require_corp)):
+async def get_config(user: str = Depends(require_prompt_admin)):
     """Get all editable bot config: FAQs, core prompt, and phase prompts."""
     from backend.chat_service import CORE_PROMPT_TEMPLATE
     from backend.conversation_router import PHASE_PROMPTS, ConversationPhase
@@ -910,10 +937,15 @@ class ConfigPromptsUpdate(BaseModel):
 
 
 @app.put("/api/admin/config/faqs")
-async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_corp)):
+async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_prompt_admin)):
     """Overwrite FAQ JSON in GCS and reload cache."""
     if len(request.faqs) > 500:
         raise HTTPException(status_code=400, detail="FAQ list exceeds maximum allowed entries (500)")
+    for idx, faq in enumerate(request.faqs):
+        _validate_prompt_content(faq.question or "", f"faqs[{idx}].question")
+        _validate_prompt_content(faq.answer or "", f"faqs[{idx}].answer")
+        _validate_prompt_content(faq.category or "", f"faqs[{idx}].category")
+        _validate_prompt_content(faq.source or "", f"faqs[{idx}].source")
     try:
         logger.warning(f"CONFIG_CHANGE: {user} updated FAQs ({len(request.faqs)} entries)")
         storage.save_faqs(request.faqs)
@@ -947,18 +979,13 @@ def _validate_prompt_content(content: str, field_name: str) -> None:
 
 
 @app.put("/api/admin/config/prompts")
-async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_corp)):
+async def update_prompts(request: ConfigPromptsUpdate, user: str = Depends(require_prompt_admin)):
     """Overwrite core prompt and phase prompts in GCS and reload cache."""
     # Explicit change-approval gate: caller must acknowledge with a reason and their own email.
     if len(request.change_reason.strip()) < 10:
         raise HTTPException(status_code=400, detail="change_reason is required (minimum 10 characters)")
     if request.confirmed_by.strip().lower() != user.lower():
         raise HTTPException(status_code=400, detail="confirmed_by must match your authenticated user email")
-    # Restrict prompt writes to designated admins only. Fail closed: if PROMPT_ADMIN_EMAILS
-    # is not configured, nobody can edit prompts (prevents silent open-access in new deploys).
-    _prompt_admins = {e.strip().lower() for e in os.environ.get("PROMPT_ADMIN_EMAILS", "").split(",") if e.strip()}
-    if not _prompt_admins or user.lower() not in _prompt_admins:
-        raise HTTPException(status_code=403, detail="Prompt updates restricted to designated admins")
     _validate_prompt_content(request.core_prompt, "core_prompt")
     # Validate phase keys to reject unknown/injected phase names
     from backend.conversation_router import ConversationPhase as _CP
