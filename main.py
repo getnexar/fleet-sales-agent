@@ -571,8 +571,7 @@ async def chat(request: ChatRequest, http_request: Request):
             })
         _llm_messages.append({"role": "user", "content": clean_question})
 
-        result = await chat_service.get_response(
-            question=clean_question,
+        result = await chat_service.get_response_from_messages(
             conversation_history=clean_history,
             messages=_llm_messages,
         )

@@ -363,6 +363,27 @@ Respond with ONLY valid JSON (no markdown, no code fences):
             "_blocked_reason": "llm_output_security_validation",
         }
 
+    async def get_response_from_messages(
+        self,
+        conversation_history: Optional[List[Message]],
+        messages: list,
+    ) -> Dict:
+        """
+        Generate a response from a caller-built Anthropic messages array.
+
+        Public chat endpoints should prefer this method after constructing
+        role-separated messages themselves. No raw user question is accepted here,
+        so user content can only reach the LLM inside explicit user-role message
+        objects and is never available for interpolation into the system prompt.
+        """
+        if not messages:
+            raise ValueError("messages are required")
+        return await self.get_response(
+            question="",
+            conversation_history=conversation_history,
+            messages=messages,
+        )
+
     async def get_response(
         self,
         question: str,
