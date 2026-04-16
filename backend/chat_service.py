@@ -133,13 +133,15 @@ class ChatService:
         faqs = self.storage.get_faqs()
         faq_text = "".join(f"Q: {faq['question']}\nA: {faq['answer']}\n\n" for faq in faqs)
 
-        # Use GCS-managed prompt if available, fall back to hardcoded
-        core_template = self.storage.get_core_prompt() or CORE_PROMPT_TEMPLATE
+        # Use GCS-managed prompt if available, fall back to hardcoded.
+        # Sanitize GCS content before use to prevent prompt injection if GCS is compromised.
+        raw_core = self.storage.get_core_prompt()
+        core_template = self._sanitize_prompt(raw_core) if raw_core else CORE_PROMPT_TEMPLATE
         core = core_template.format(faqs=faq_text.strip())
 
         gcs_phase_prompts = self.storage.get_phase_prompts()
         if gcs_phase_prompts and phase.value in gcs_phase_prompts:
-            phase_section = gcs_phase_prompts[phase.value]
+            phase_section = self._sanitize_prompt(gcs_phase_prompts[phase.value])
         else:
             phase_section = PHASE_PROMPTS[phase]
 
@@ -220,6 +222,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         """
         Sanitize user input to prevent prompt injection.
         Strips common injection patterns while preserving legitimate content.
+        Logs when patterns are neutralized so suspicious sessions can be monitored.
         """
         if not text:
             return text
@@ -227,7 +230,7 @@ Respond with ONLY valid JSON (no markdown, no code fences):
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
         # Truncate to max allowed length (already validated at API layer, but belt-and-suspenders)
         text = text[:2000]
-        # Strip prompt injection markers
+        # Strip prompt injection markers and log detections for alerting
         injection_patterns = [
             r'(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?',
             r'(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?',
@@ -237,38 +240,108 @@ Respond with ONLY valid JSON (no markdown, no code fences):
             r'(?i)<\s*system\s*>',
             r'(?i)###\s*system',
             r'(?i)###\s*instruction',
+            r'(?i)system\s+override',
+            r'(?i)prompt\s+injection',
         ]
         for pattern in injection_patterns:
-            text = re.sub(pattern, '[removed]', text)
+            cleaned, count = re.subn(pattern, '[removed]', text)
+            if count:
+                logger.warning(
+                    f"SECURITY: Prompt injection pattern neutralized ({count} instance(s)) — pattern: {pattern[:50]}"
+                )
+            text = cleaned
         return text.strip()
+
+    @staticmethod
+    def _sanitize_prompt(text: str) -> str:
+        """
+        Sanitize admin-managed prompts loaded from GCS before they are assembled into
+        the system prompt. Unlike _sanitize_input, this does NOT truncate (prompts are
+        legitimately long), but it does strip control characters and known injection
+        markers that could escalate privileges if GCS content is tampered with.
+        """
+        if not text:
+            return text
+        # Remove null bytes and control characters (except newline/tab)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        injection_patterns = [
+            r'(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)forget\s+(all\s+)?(previous|prior|above)\s+instructions?',
+            r'(?i)\[system\]',
+            r'(?i)<\s*system\s*>',
+            r'(?i)###\s*system',
+            r'(?i)###\s*instruction',
+            r'(?i)system\s+override',
+            r'(?i)prompt\s+injection',
+        ]
+        for pattern in injection_patterns:
+            cleaned, count = re.subn(pattern, '[removed]', text)
+            if count:
+                logger.warning(
+                    f"SECURITY: Injection pattern in GCS prompt neutralized ({count} instance(s)) — pattern: {pattern[:50]}"
+                )
+            text = cleaned
+        return text
+
+    @staticmethod
+    def _filter_output(answer: str) -> str:
+        """
+        Scan AI output for prompt injection success indicators and system prompt leakage.
+        Logs warnings so suspicious outputs are visible in monitoring dashboards.
+        The response is still returned — filtering is detect-and-alert, not block.
+        """
+        leak_patterns = [
+            (r'(?i)my system prompt', "system prompt reference"),
+            (r'(?i)my instructions (say|are|tell me to)', "instruction disclosure"),
+            (r'(?i)i(\'ve| have) been instructed to', "instruction disclosure"),
+            (r'(?i)ignore (previous|all|prior) instructions', "injection success indicator"),
+            (r'CORE_PROMPT_TEMPLATE', "internal template name leaked"),
+            (r'(?i)## current conversation phase', "system prompt section leaked"),
+        ]
+        for pattern, label in leak_patterns:
+            if re.search(pattern, answer):
+                logger.warning(f"SECURITY: AI output filter triggered — {label} detected in response")
+        return answer
 
     async def get_response(
         self,
         question: str,
-        conversation_history: Optional[List[Message]] = None
+        conversation_history: Optional[List[Message]] = None,
+        messages: Optional[list] = None,
     ) -> Dict:
         """
         Get AI response for user question.
         Returns dict with answer, follow_up, cta_type, and lead_signals.
+
+        Security: user question is passed to the Anthropic API as a separate user-role
+        message in the messages array ({"role": "user", "content": question}) and
+        is never interpolated into the system prompt string. The system prompt is passed
+        via the system= parameter of client.messages.create(), maintaining strict role
+        separation between instructions and user-supplied data.
+
+        When the caller pre-builds the messages array (recommended for auditability),
+        it is passed directly as the `messages` parameter. When not provided, messages
+        are constructed internally from question and conversation_history.
         """
         # Detect conversation phase and build phase-aware system prompt
         phase = detect_phase(conversation_history)
         system_prompt = self._build_system_prompt(phase)
         logger.info(f"Conversation phase: {phase.value}")
 
-        # Sanitize user input before passing to AI
-        clean_question = self._sanitize_input(question)
-
-        # Build conversation history for Anthropic (role: user/assistant)
-        messages = []
-        if conversation_history:
-            for msg in conversation_history:
-                sanitized_content = self._sanitize_input(msg.content) if msg.role == "user" else msg.content
-                messages.append({
-                    "role": "user" if msg.role == "user" else "assistant",
-                    "content": sanitized_content,
-                })
-        messages.append({"role": "user", "content": clean_question})
+        if messages is None:
+            # Build messages array: sanitize user input and apply role separation.
+            # User question is a user-role message; never interpolated into system prompt.
+            clean_question = self._sanitize_input(question)
+            messages = []
+            if conversation_history:
+                for msg in conversation_history:
+                    sanitized_content = self._sanitize_input(msg.content) if msg.role == "user" else msg.content
+                    messages.append({
+                        "role": "user" if msg.role == "user" else "assistant",
+                        "content": sanitized_content,
+                    })
+            messages.append({"role": "user", "content": clean_question})
 
         max_retries = 3
         eval_regenerated = False  # only allow one evaluator-triggered regeneration per call
@@ -328,6 +401,8 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                         parsed["answer"] = stripped + f"\n\n{fallback}"
 
                 parsed["_phase"] = phase.value
+                # Output filter: log if response shows signs of injection success or leakage
+                self._filter_output(parsed.get("answer", ""))
                 return parsed
 
             except json.JSONDecodeError:
