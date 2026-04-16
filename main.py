@@ -15,6 +15,7 @@ import time
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -217,6 +218,11 @@ _TRUSTED_PAGE_ORIGINS = {
     "https://fleet.getnexar.com",
     "https://fleet-sales-agent.corp.nexars.ai",
 }
+if not _TRUSTED_PAGE_ORIGINS:
+    raise RuntimeError("Trusted page origins must be configured for HubSpot pageUri validation")
+for _trusted_origin in _TRUSTED_PAGE_ORIGINS:
+    if urlsplit(_trusted_origin).scheme != "https" or not urlsplit(_trusted_origin).netloc:
+        raise RuntimeError(f"Invalid trusted page origin: {_trusted_origin}")
 
 _PROMPT_ATTACK_PATTERNS = [
     re.compile(r'\b(ignore|disregard|forget|bypass|override)\b.{0,80}\b(instruction|prompt|policy|rule|guardrail|system|developer)\b', re.IGNORECASE),
@@ -226,6 +232,13 @@ _PROMPT_ATTACK_PATTERNS = [
     re.compile(r'\bbase64|rot13|unicode|homoglyph|zero-width|jailbreak|prompt injection\b', re.IGNORECASE),
 ]
 
+_LLM_OUTPUT_SECURITY_PATTERNS = [
+    re.compile(r'\b(system prompt|developer message|hidden instruction|internal prompt)\b', re.IGNORECASE),
+    re.compile(r'\b(ignore|disregard|bypass|override)\b.{0,80}\b(instruction|prompt|policy|rule|guardrail)\b', re.IGNORECASE),
+    re.compile(r'\b(api[_ -]?key|secret manager|anthropic_api_key|conversation history)\b', re.IGNORECASE),
+    re.compile(r'\b(lead_signals|cta_type|follow_up|current conversation phase|security boundary)\b', re.IGNORECASE),
+]
+
 
 def _looks_like_prompt_attack(text: str) -> bool:
     """Detect jailbreak/prompt-exfiltration attempts before any user text reaches the LLM."""
@@ -233,6 +246,41 @@ def _looks_like_prompt_attack(text: str) -> bool:
     normalized = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f]', '', normalized)
     normalized = re.sub(r'\s+', ' ', normalized).strip()
     return any(pattern.search(normalized) for pattern in _PROMPT_ATTACK_PATTERNS)
+
+
+def _moderate_llm_result(result: dict) -> tuple[bool, str]:
+    """
+    Secondary deterministic moderation for model output before any LLM-originated
+    answer or extracted lead field is returned, stored, sent to Slack, or posted
+    to HubSpot.
+    """
+    parts = [
+        str((result or {}).get("answer") or ""),
+        str((result or {}).get("follow_up") or ""),
+    ]
+    lead = (result or {}).get("lead_signals") or {}
+    if isinstance(lead, dict):
+        parts.extend(str(value) for value in lead.values() if value is not None)
+    normalized = unicodedata.normalize("NFKC", "\n".join(parts))
+    normalized = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f]', '', normalized)
+    for pattern in _LLM_OUTPUT_SECURITY_PATTERNS:
+        if pattern.search(normalized):
+            return False, pattern.pattern[:80]
+    return True, ""
+
+
+def _safe_security_chat_response(session_id: str) -> ChatResponse:
+    return ChatResponse(
+        answer=(
+            "I can help with Nexar Fleet products, pricing, installation, or getting you set up with sales. "
+            "What would you like to know about your fleet?"
+        ),
+        session_id=session_id,
+        suggested_follow_ups=[],
+        lead_collected=False,
+        cta_type="info",
+        quote_url=None,
+    )
 
 
 def _validate_lead_signals(signals: dict) -> dict:
@@ -327,26 +375,34 @@ def _sanitize_lead_for_downstream(lead: dict) -> dict:
 def _client_rate_limit_key(request: Request) -> str:
     """Hash client IP into a stable, non-reversible key for public endpoint limits."""
     forwarded_for = request.headers.get("X-Forwarded-For", "")
-    client_ip = forwarded_for.split(",")[0].strip()
+    # The trusted platform ingress appends its observed client IP at the end.
+    client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
     if not client_ip and request.client:
         client_ip = request.client.host or ""
+    client_ip = re.sub(r'[^\x20-\x7e]', '', client_ip)[:45]
     digest = hashlib.sha256(client_ip.encode("utf-8")).hexdigest()[:24]
     return f"ip_{digest}"
 
 
+def _trusted_origin_from_url(value: str) -> str:
+    parsed = urlsplit((value or "").strip())
+    if parsed.scheme != "https" or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
 def _hubspot_page_uri(request: Request) -> str:
     """Prefer configured/observed trusted public page context over internal app URL."""
-    if HUBSPOT_PAGE_URI:
+    if HUBSPOT_PAGE_URI and _trusted_origin_from_url(HUBSPOT_PAGE_URI) in _TRUSTED_PAGE_ORIGINS:
         return HUBSPOT_PAGE_URI[:500]
 
     referer = request.headers.get("Referer", "")
-    for trusted_origin in _TRUSTED_PAGE_ORIGINS:
-        if referer.startswith(trusted_origin):
-            return referer[:500]
+    if _trusted_origin_from_url(referer) in _TRUSTED_PAGE_ORIGINS:
+        return referer[:500]
 
     origin = request.headers.get("Origin", "")
-    if origin in _TRUSTED_PAGE_ORIGINS:
-        return origin
+    if _trusted_origin_from_url(origin) in _TRUSTED_PAGE_ORIGINS:
+        return _trusted_origin_from_url(origin)
 
     return "https://fleet.getnexar.com"
 
@@ -520,10 +576,29 @@ async def chat(request: ChatRequest, http_request: Request):
             conversation_history=clean_history,
             messages=_llm_messages,
         )
+        output_safe, output_reason = _moderate_llm_result(result)
+        if not output_safe:
+            logger.warning(
+                f"SECURITY: blocked unsafe LLM output for session {_sid(request.session_id)} "
+                f"before downstream use ({output_reason})"
+            )
+            safe_response = _safe_security_chat_response(request.session_id)
+            await firestore_service.save_message(
+                session_id=request.session_id,
+                role="user",
+                content=request.question,
+            )
+            await firestore_service.save_message(
+                session_id=request.session_id,
+                role="assistant",
+                content=safe_response.answer,
+                metadata={"blocked_reason": "llm_output_security_validation"},
+            )
+            return safe_response
 
         # Sanitize AI-generated answer before returning to client.
-        # Caps length and strips control characters; does not block content — the
-        # _filter_output() call in chat_service already logs suspicious patterns.
+        # Caps length and strips control characters after the fail-closed
+        # moderation check above has approved the model output.
         _raw_answer = result.get("answer", "") or ""
         answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
         follow_up = result.get("follow_up")
@@ -829,8 +904,9 @@ async def export_conversations(request: Request, limit: int = Query(default=25, 
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
-    # Use X-Forwarded-For to get real client IP behind Cloud Run / load balancer
-    client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown").split(",")[0].strip()
+    # The trusted platform ingress appends its observed client IP at the end.
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else (request.client.host if request.client else "unknown")
     client_ip = _safe_log_value(client_ip, 45)
     logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
