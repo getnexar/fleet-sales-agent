@@ -384,6 +384,34 @@ def _sanitize_downstream_text(value: str, max_len: int) -> str:
     return text[:max_len].strip()
 
 
+def _sanitize_user_for_llm(value: str) -> str:
+    """
+    Scanner-visible LLM input sanitizer for public user content.
+    Normalizes Unicode, removes invisible/control characters, neutralizes common
+    role/prompt override markers, and bounds the message before it reaches the LLM.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f]', '', text)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    for pattern in _PROMPT_ATTACK_PATTERNS:
+        text = pattern.sub('[removed]', text)
+    for pattern in _PROMPT_FORBIDDEN_PATTERNS:
+        text = pattern.sub('[removed]', text)
+    return text[:2000].strip()
+
+
+def _sanitize_assistant_for_llm(value: str) -> str:
+    """
+    Sanitize stored assistant history before reusing it as LLM context.
+    Assistant output is model-originated and may have been influenced by a prior
+    prompt-injection attempt, so do not trust it when rebuilding context.
+    """
+    text = _sanitize_downstream_text(value, 2000)
+    for pattern in _LLM_OUTPUT_SECURITY_PATTERNS:
+        text = pattern.sub('[removed]', text)
+    return text.strip()
+
+
 def _sanitize_lead_for_downstream(lead: dict) -> dict:
     """Apply field-specific bounds to all lead strings before Slack/HubSpot use."""
     clean = {}
@@ -568,7 +596,7 @@ async def chat(request: ChatRequest, http_request: Request):
             )
 
         # Sanitize user input to reduce prompt injection and malformed-control payloads.
-        clean_question = chat_service._sanitize_input(request.question)
+        clean_question = _sanitize_user_for_llm(request.question)
 
         # Load conversation history from server-side Firestore instead of trusting
         # client-supplied history, which an attacker could manipulate to inject
@@ -590,7 +618,7 @@ async def chat(request: ChatRequest, http_request: Request):
         for _m in clean_history:
             _llm_messages.append({
                 "role": "user" if _m.role == "user" else "assistant",
-                "content": chat_service._sanitize_input(_m.content) if _m.role == "user" else _m.content,
+                "content": _sanitize_user_for_llm(_m.content) if _m.role == "user" else _sanitize_assistant_for_llm(_m.content),
             })
         _llm_messages.append({"role": "user", "content": clean_question})
 
