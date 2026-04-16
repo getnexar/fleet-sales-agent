@@ -238,6 +238,12 @@ _LLM_OUTPUT_SECURITY_PATTERNS = [
     re.compile(r'\b(api[_ -]?key|secret manager|anthropic_api_key|conversation history)\b', re.IGNORECASE),
     re.compile(r'\b(lead_signals|cta_type|follow_up|current conversation phase|security boundary)\b', re.IGNORECASE),
 ]
+_LLM_RESULT_ALLOWED_KEYS = {"answer", "follow_up", "cta_type", "lead_signals", "_phase", "_blocked_reason"}
+_LLM_LEAD_ALLOWED_KEYS = {
+    "fleet_size", "industry", "pain_points", "contact_name", "contact_email",
+    "contact_phone", "order_intent", "business_name", "num_cameras",
+    "camera_model", "memory_option", "subscription_plan",
+}
 
 
 def _looks_like_prompt_attack(text: str) -> bool:
@@ -254,6 +260,23 @@ def _moderate_llm_result(result: dict) -> tuple[bool, str]:
     answer or extracted lead field is returned, stored, sent to Slack, or posted
     to HubSpot.
     """
+    if not isinstance(result, dict):
+        return False, "model result is not an object"
+    unexpected_keys = set(result) - _LLM_RESULT_ALLOWED_KEYS
+    if unexpected_keys:
+        return False, f"unexpected result keys: {sorted(unexpected_keys)[:3]}"
+    if not isinstance(result.get("answer"), str):
+        return False, "answer is not a string"
+    if result.get("follow_up") is not None and not isinstance(result.get("follow_up"), str):
+        return False, "follow_up is not a string"
+    if result.get("cta_type") not in {"quote", "info", "demo", "trial", None}:
+        return False, "invalid cta_type"
+    if not isinstance(result.get("lead_signals") or {}, dict):
+        return False, "lead_signals is not an object"
+    unexpected_lead_keys = set((result.get("lead_signals") or {})) - _LLM_LEAD_ALLOWED_KEYS
+    if unexpected_lead_keys:
+        return False, f"unexpected lead keys: {sorted(unexpected_lead_keys)[:3]}"
+
     parts = [
         str((result or {}).get("answer") or ""),
         str((result or {}).get("follow_up") or ""),

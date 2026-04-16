@@ -1,6 +1,18 @@
 import ReactMarkdown from 'react-markdown'
 import type { Message } from '../types'
 
+const ALLOWED_MARKDOWN_ELEMENTS = ['p', 'ul', 'ol', 'li', 'strong', 'em', 'a', 'br']
+
+function safeLink(href?: string) {
+  if (!href) return '#'
+  try {
+    const url = new URL(href, window.location.origin)
+    return url.protocol === 'https:' ? url.toString() : '#'
+  } catch {
+    return '#'
+  }
+}
+
 interface Props {
   message: Message
 }
@@ -18,13 +30,15 @@ export default function MessageBubble({ message }: Props) {
             message.content
           ) : (
             <ReactMarkdown
+              skipHtml
+              allowedElements={ALLOWED_MARKDOWN_ELEMENTS}
               components={{
                 p: ({ children }) => <p style={{ margin: '0 0 8px 0' }}>{children}</p>,
                 ul: ({ children }) => <ul style={{ margin: '4px 0', paddingLeft: 20 }}>{children}</ul>,
                 ol: ({ children }) => <ol style={{ margin: '4px 0', paddingLeft: 20 }}>{children}</ol>,
                 li: ({ children }) => <li style={{ marginBottom: 2 }}>{children}</li>,
                 strong: ({ children }) => <strong style={{ fontWeight: 600 }}>{children}</strong>,
-                a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'underline' }}>{children}</a>,
+                a: ({ href, children }) => <a href={safeLink(href)} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'underline' }}>{children}</a>,
               }}
             >
               {message.content}
