@@ -4,11 +4,20 @@ description: AI-powered sales assistant for Nexar Fleet - answers FAQs, qualifie
 
 # Public access - no authentication required
 public_api: true
-public_routes:
-  - path: /api/chat
-    methods: [POST]
-  - path: /api/feedback
-    methods: [POST]
+public_edge:
+  routes:
+    - path: /api/chat
+      methods: [POST]
+      profile: body_submission
+      rate_limit:
+        requests_per_minute: 60
+        ban_duration_sec: 900
+    - path: /api/feedback
+      methods: [POST]
+      profile: body_submission
+      rate_limit:
+        requests_per_minute: 60
+        ban_duration_sec: 900
 
 # Resources
 resources:
