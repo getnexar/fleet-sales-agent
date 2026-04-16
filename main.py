@@ -218,6 +218,22 @@ _TRUSTED_PAGE_ORIGINS = {
     "https://fleet-sales-agent.corp.nexars.ai",
 }
 
+_PROMPT_ATTACK_PATTERNS = [
+    re.compile(r'\b(ignore|disregard|forget|bypass|override)\b.{0,80}\b(instruction|prompt|policy|rule|guardrail|system|developer)\b', re.IGNORECASE),
+    re.compile(r'\b(reveal|print|show|dump|exfiltrate|repeat)\b.{0,80}\b(system prompt|developer message|hidden instruction|internal prompt|conversation history|secret|api key)\b', re.IGNORECASE),
+    re.compile(r'\b(you are now|act as|roleplay as|pretend to be|simulate)\b.{0,80}\b(admin|root|developer|system|unfiltered|uncensored|dan|jailbreak)\b', re.IGNORECASE),
+    re.compile(r'\b(do not|don\'t)\b.{0,60}\b(follow|obey)\b.{0,60}\b(previous|above|original|system|developer)\b', re.IGNORECASE),
+    re.compile(r'\bbase64|rot13|unicode|homoglyph|zero-width|jailbreak|prompt injection\b', re.IGNORECASE),
+]
+
+
+def _looks_like_prompt_attack(text: str) -> bool:
+    """Detect jailbreak/prompt-exfiltration attempts before any user text reaches the LLM."""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f]', '', normalized)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return any(pattern.search(normalized) for pattern in _PROMPT_ATTACK_PATTERNS)
+
 
 def _validate_lead_signals(signals: dict) -> dict:
     """
@@ -444,7 +460,35 @@ async def chat(request: ChatRequest, http_request: Request):
     ):
         raise HTTPException(status_code=429, detail="Too many requests")
     try:
-        # Sanitize user input to prevent prompt injection
+        # Block explicit jailbreak/prompt-exfiltration attempts before LLM invocation.
+        # Sanitization below remains defense-in-depth for normal customer messages.
+        if _looks_like_prompt_attack(request.question):
+            logger.warning(f"SECURITY: blocked prompt injection attempt for session {_sid(request.session_id)}")
+            await firestore_service.save_message(
+                session_id=request.session_id,
+                role="user",
+                content="[blocked prompt-injection attempt]",
+            )
+            safe_answer = (
+                "I can help with Nexar Fleet products, pricing, installation, or getting you set up with sales. "
+                "What would you like to know about your fleet?"
+            )
+            await firestore_service.save_message(
+                session_id=request.session_id,
+                role="assistant",
+                content=safe_answer,
+                metadata={"blocked_reason": "prompt_injection"},
+            )
+            return ChatResponse(
+                answer=safe_answer,
+                session_id=request.session_id,
+                suggested_follow_ups=[],
+                lead_collected=False,
+                cta_type="info",
+                quote_url=None,
+            )
+
+        # Sanitize user input to reduce prompt injection and malformed-control payloads.
         clean_question = chat_service._sanitize_input(request.question)
 
         # Load conversation history from server-side Firestore instead of trusting
