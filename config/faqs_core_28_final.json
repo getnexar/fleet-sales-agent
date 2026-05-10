@@ -211,9 +211,9 @@
   },
   {
     "question": "What is the estimated delivery time for the dash cams?",
-    "answer": "For in-stock orders, we guarantee delivery within 3-5 business days. For larger orders that may not be in stock, we'll need to check with our logistics team. Please let me know: 1) How many cameras do you need? 2) Do you prefer to receive everything in one shipment, or would you like to split the order into batches to get some cameras sooner? Camera manufacturing typically takes 45-60 business days, so even for custom orders, delivery shouldn't exceed that timeframe.",
+    "answer": "Delivery timelines depend on order size and current supply — our sales team confirms availability and lead times for each order. To get you an accurate timeline, I'd like to pass your details along to them. A couple of quick questions first: How many cameras do you need, and is there a date you're working toward? That'll help them prioritize.",
     "source": "official",
-    "source_note": "Updated with official delivery policy: 3-5 business days for in-stock, logistics coordination for large orders, 45-60 business days maximum for manufacturing.",
+    "source_note": "Updated per supply constraints: agent should not confirm or deny stock availability. Probe for quantity and timeline, then hand off to sales team for confirmation.",
     "category": "support",
     "consolidated_from": [
       "What is the estimated delivery time for the road and cabin dash cams?",
