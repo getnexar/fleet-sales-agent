@@ -651,6 +651,10 @@ async def chat(request: ChatRequest, http_request: Request):
         # moderation check above has approved the model output.
         _raw_answer = result.get("answer", "") or ""
         answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
+        # Strip XSS vectors from LLM output before sending to the markdown-rendering frontend.
+        answer = re.sub(r'javascript\s*:', 'javascript_blocked:', answer, flags=re.IGNORECASE)
+        answer = re.sub(r'<script[\s\S]*?</script>', '', answer, flags=re.IGNORECASE)
+        answer = re.sub(r'(<[^>]+)\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*)', r'\1', answer, flags=re.IGNORECASE)
         follow_up = result.get("follow_up")
         cta_type = result.get("cta_type")
         if cta_type not in {"quote", "info", "demo", "trial", None}:
@@ -823,19 +827,38 @@ async def chat(request: ChatRequest, http_request: Request):
                                 f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
                                 f"form submission rejected — check integration configuration"
                             )
-                        elif _hr.status_code == 429 or 500 <= _hr.status_code < 600:
-                            # Transient failure — rate limit or HubSpot/server issue.
-                            # Cool down between attempts so every chat turn doesn't call HubSpot.
+                        elif _hr.status_code == 429:
+                            # Rate limit — clearly transient, retry with cooldown.
                             _update = _hubspot_failure_update(current_lead)
                             if _update.get("hubspot_permanently_failed"):
                                 logger.error(
-                                    f"HubSpot giving up after {_update['hubspot_retry_count']} transient failures "
+                                    f"HubSpot giving up after {_update['hubspot_retry_count']} rate-limit failures "
                                     f"for session {_sid(request.session_id)}"
                                 )
                             else:
                                 logger.warning(
-                                    f"HubSpot transient failure {_hr.status_code} "
+                                    f"HubSpot rate-limited (429) "
                                     f"(attempt {_update['hubspot_retry_count']}/{HUBSPOT_RETRY_LIMIT}) "
+                                    f"for session {_sid(request.session_id)}"
+                                )
+                            await firestore_service.upsert_lead(request.session_id, _update)
+                        elif 500 <= _hr.status_code < 600:
+                            # Server-side error — may be transient but repeated 5xx can indicate
+                            # a misconfigured payload (wrong field names, malformed data). Retry
+                            # up to HUBSPOT_RETRY_LIMIT; giving up permanently avoids an infinite
+                            # retry loop against a config issue that will never self-resolve.
+                            _update = _hubspot_failure_update(current_lead)
+                            if _update.get("hubspot_permanently_failed"):
+                                logger.error(
+                                    f"HubSpot giving up after {_update['hubspot_retry_count']} server errors "
+                                    f"(last: {_hr.status_code}) — check portal/form ID and field mapping "
+                                    f"for session {_sid(request.session_id)}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"HubSpot server error {_hr.status_code} "
+                                    f"(attempt {_update['hubspot_retry_count']}/{HUBSPOT_RETRY_LIMIT}) — "
+                                    f"if this persists, verify HubSpot field configuration "
                                     f"for session {_sid(request.session_id)}"
                                 )
                             await firestore_service.upsert_lead(request.session_id, _update)
