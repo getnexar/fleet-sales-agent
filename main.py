@@ -739,9 +739,15 @@ async def chat(request: ChatRequest, http_request: Request):
                 or lead_signals.get("order_intent") == "HIGH"
             )
 
+            # fleet_size is required by HubSpot; accept num_cameras as a proxy when absent
+            _fleet_size_satisfied = current_lead.get("fleet_size") or current_lead.get("num_cameras")
+            _non_fleet_required = HUBSPOT_REQUIRED_FIELDS - {"fleet_size"}
+
             # Log what's missing so we can debug gate failures
             if wants_sales_followup and not current_lead.get("hubspot_submitted"):
-                missing = [f for f in HUBSPOT_REQUIRED_FIELDS if not current_lead.get(f)]
+                missing = [f for f in _non_fleet_required if not current_lead.get(f)]
+                if not _fleet_size_satisfied:
+                    missing.append("fleet_size (or num_cameras)")
                 if missing:
                     logger.info(f"HubSpot gate: missing fields {missing} for session {_sid(request.session_id)}")
 
@@ -751,7 +757,8 @@ async def chat(request: ChatRequest, http_request: Request):
                 and not current_lead.get("hubspot_submitted")
                 and not current_lead.get("hubspot_permanently_failed")
                 and _hubspot_retry_due(current_lead)
-                and all(current_lead.get(f) for f in HUBSPOT_REQUIRED_FIELDS)
+                and _fleet_size_satisfied
+                and all(current_lead.get(f) for f in _non_fleet_required)
                 and HUBSPOT_PORTAL_ID
                 and HUBSPOT_FORM_ID
             ):
