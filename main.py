@@ -651,10 +651,13 @@ async def chat(request: ChatRequest, http_request: Request):
         # moderation check above has approved the model output.
         _raw_answer = result.get("answer", "") or ""
         answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
-        # Strip XSS vectors from LLM output before sending to the markdown-rendering frontend.
+        # Strip all HTML tags from LLM output — the frontend renders markdown, not HTML,
+        # so any tags in the response are unnecessary and potentially dangerous.
+        # Blanket tag removal is more robust than pattern-matching specific vectors
+        # (script, img onerror, SVG, CSS expressions, etc.).
+        answer = re.sub(r'<[^>]+>', '', answer)
+        # Neutralize javascript: URIs that could appear in markdown link syntax [text](javascript:...)
         answer = re.sub(r'javascript\s*:', 'javascript_blocked:', answer, flags=re.IGNORECASE)
-        answer = re.sub(r'<script[\s\S]*?</script>', '', answer, flags=re.IGNORECASE)
-        answer = re.sub(r'(<[^>]+)\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*)', r'\1', answer, flags=re.IGNORECASE)
         follow_up = result.get("follow_up")
         cta_type = result.get("cta_type")
         if cta_type not in {"quote", "info", "demo", "trial", None}:
@@ -666,11 +669,13 @@ async def chat(request: ChatRequest, http_request: Request):
         # Build suggested follow-ups list
         follow_ups = [follow_up] if follow_up else []
 
-        # Save both messages to Firestore conversation log
+        # Save both messages to Firestore conversation log.
+        # Store clean_question (sanitized) not raw request.question so that injection
+        # attempts don't persist in Firestore, admin exports, or Slack notifications.
         await firestore_service.save_message(
             session_id=request.session_id,
             role="user",
-            content=request.question,
+            content=clean_question,
         )
         await firestore_service.save_message(
             session_id=request.session_id,
