@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Literal
 from pydantic import BaseModel, Field
@@ -1243,18 +1243,25 @@ if STATIC_DIR.exists():
     if (STATIC_DIR / "assets").exists():
         app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
+    def _serve_index():
+        resp = FileResponse(STATIC_DIR / "index.html")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         # Resolve and validate path is within STATIC_DIR to prevent directory traversal
         try:
             resolved = (STATIC_DIR / full_path).resolve()
             if not str(resolved).startswith(str(STATIC_DIR.resolve()) + "/") and resolved != STATIC_DIR.resolve():
-                return FileResponse(STATIC_DIR / "index.html")
+                return _serve_index()
             if resolved.exists() and resolved.is_file():
                 return FileResponse(resolved)
         except Exception:
             pass
-        return FileResponse(STATIC_DIR / "index.html")
+        return _serve_index()
 else:
     @app.get("/")
     async def root():
