@@ -18,6 +18,10 @@ public_edge:
       rate_limit:
         requests_per_minute: 60
         ban_duration_sec: 900
+    - path: /
+      methods: [GET]
+    - path: /assets/
+      methods: [GET]
 
 # Resources
 resources:
