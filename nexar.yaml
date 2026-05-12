@@ -28,7 +28,7 @@ public_edge:
 # Resources
 resources:
   memory: 512Mi
-  min_instances: 0
+  min_instances: 1
   max_instances: 10
   timeout: 60s
 

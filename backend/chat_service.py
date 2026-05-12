@@ -125,7 +125,7 @@ class ChatService:
     def __init__(self, storage: StorageService):
         self.storage = storage
         api_key = self._get_api_key()
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.client = anthropic.Anthropic(api_key=api_key, max_retries=0)
         self.model = "claude-sonnet-4-6"
         logger.info(f"ChatService initialized with model: {self.model}")
 
@@ -556,14 +556,14 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                 is_rate_limit = "429" in error_str or "rate_limit" in error_str.lower() or "overloaded" in error_str.lower()
 
                 if is_rate_limit and attempt < max_retries - 1:
-                    delay = 2 * (2 ** attempt)
-                    logger.warning(f"Rate limit hit, retrying in {delay}s")
+                    delay = 3 * (2 ** attempt)
+                    logger.warning(f"Anthropic overloaded, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
                     time.sleep(delay)
                     continue
 
                 logger.error(f"Claude error: {error_str}")
                 return {
-                    "answer": "I'm having trouble right now. Please try again in a moment, or contact us directly at fleethelp@getnexar.com or (929) 447-2317.",
+                    "answer": "Give me just a second — I hit a snag on my end. Could you send that again?",
                     "follow_up": None,
                     "cta_type": None,
                     "lead_signals": {}
