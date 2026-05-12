@@ -20,8 +20,10 @@ public_edge:
         ban_duration_sec: 900
     - path: /
       methods: [GET]
+      profile: app_route
     - path: /assets/
       methods: [GET]
+      profile: app_route
 
 # Resources
 resources:
