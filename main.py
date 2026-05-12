@@ -155,7 +155,8 @@ app.add_middleware(
 async def set_embedding_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
-        "frame-ancestors https://fleet.getnexar.com https://fleet-sales-agent.corp.nexars.ai"
+        "frame-ancestors https://fleet.getnexar.com https://fleet-sales-agent.corp.nexars.ai "
+        "https://tagassistant.google.com https://*.getnexar.com"
     )
     return response
 
@@ -576,8 +577,12 @@ async def chat(request: ChatRequest, http_request: Request):
     ):
         raise HTTPException(status_code=429, detail="Too many requests")
     try:
-        # Block explicit jailbreak/prompt-exfiltration attempts before LLM invocation.
-        # Sanitization below remains defense-in-depth for normal customer messages.
+        # Public endpoint prompt injection mitigations (all applied in sequence):
+        # 1. _looks_like_prompt_attack  — regex block on explicit override/exfiltration patterns
+        # 2. _sanitize_user_for_llm    — unicode normalisation + injection pattern stripping
+        # 3. Role separation           — user content only ever placed in user-role messages
+        # 4. _moderate_llm_result      — fail-closed output schema + security pattern check
+        # 5. _sanitize_assistant_for_llm — stored history re-sanitised before LLM replay
         if _looks_like_prompt_attack(request.question):
             logger.warning(f"SECURITY: blocked prompt injection attempt for session {_sid(request.session_id)}")
             await firestore_service.save_message(
@@ -660,11 +665,13 @@ async def chat(request: ChatRequest, http_request: Request):
         # moderation check above has approved the model output.
         _raw_answer = result.get("answer", "") or ""
         answer = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', _raw_answer)[:8000]
-        # Strip all HTML tags from LLM output — the frontend renders markdown, not HTML,
-        # so any tags in the response are unnecessary and potentially dangerous.
-        # Blanket tag removal is more robust than pattern-matching specific vectors
-        # (script, img onerror, SVG, CSS expressions, etc.).
-        answer = re.sub(r'<[^>]+>', '', answer)
+        # Strip all HTML tags from LLM output — the frontend renders markdown, not HTML.
+        # Apply iteratively until stable to handle malformed/nested bypass patterns
+        # (e.g. <<script>script>, <scr<script>ipt>) that survive a single pass.
+        _prev = None
+        while _prev != answer:
+            _prev = answer
+            answer = re.sub(r'<[^>]*>', '', answer)
         # Neutralize javascript: URIs that could appear in markdown link syntax [text](javascript:...)
         answer = re.sub(r'javascript\s*:', 'javascript_blocked:', answer, flags=re.IGNORECASE)
         follow_up = result.get("follow_up")
