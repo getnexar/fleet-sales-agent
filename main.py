@@ -110,6 +110,12 @@ from backend.docusign_service import DocuSignService
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
+# Startup assertions — fail fast on missing security-critical config
+if not os.environ.get("PROMPT_ADMIN_EMAILS", "").strip():
+    raise RuntimeError("PROMPT_ADMIN_EMAILS must be set — bot configuration endpoints would be inaccessible without it")
+if not os.environ.get("EXPORT_ALLOWED_EMAILS", "").strip():
+    logger.warning("EXPORT_ALLOWED_EMAILS is not set — conversation export is open to all @getnexar.com accounts")
+
 # Initialize app
 app = FastAPI(
     title="Fleet Sales AI Agent",
@@ -322,9 +328,12 @@ def _validate_lead_signals(signals: dict) -> dict:
             ):
                 validated[k] = v.strip()[:254]
         elif k == "contact_phone":
-            digits = re.sub(r'\D', '', str(v))
-            if 7 <= len(digits) <= 15:
-                validated[k] = str(v)[:20]
+            phone_str = str(v).strip()
+            digits = re.sub(r'\D', '', phone_str)
+            # Require both digit-count range and phone-safe characters only
+            if (7 <= len(digits) <= 15 and
+                    re.fullmatch(r'[\d\s\+\-\.\(\)]{7,25}', phone_str)):
+                validated[k] = phone_str[:20]
         elif k == "fleet_size":
             try:
                 fs = int(float(str(v)))
@@ -1186,6 +1195,14 @@ def _validate_prompt_content(content: str, field_name: str) -> None:
         raise HTTPException(status_code=400, detail=f"{field_name} exceeds maximum allowed size")
     for pattern in _PROMPT_FORBIDDEN_PATTERNS:
         if pattern.search(content):
+            raise HTTPException(status_code=400, detail=f"{field_name} contains invalid content")
+    # Scan for prompt injection attack patterns — admin-submitted content is injected
+    # directly into the LLM system prompt, so it must pass the same attack scanner
+    # applied to user input.
+    _normalized = unicodedata.normalize("NFKC", content)
+    _normalized = re.sub(r'[​-‏‪-‮⁠-⁯]', '', _normalized)
+    for pattern in _PROMPT_ATTACK_PATTERNS:
+        if pattern.search(_normalized):
             raise HTTPException(status_code=400, detail=f"{field_name} contains invalid content")
 
 
