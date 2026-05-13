@@ -25,13 +25,14 @@ public_edge:
       methods: [GET]
       profile: app_route
 
+cost_center: SM-MKT-GEN-4
+
 # Resources
 resources:
   memory: 512Mi
   min_instances: 1
   max_instances: 10
   timeout: 60s
-  cost_center: SM-MKT-GEN-4
 
 # Capabilities
 capabilities:
