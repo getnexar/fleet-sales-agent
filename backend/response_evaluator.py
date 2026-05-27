@@ -207,14 +207,27 @@ def evaluate_response(
         working_lower = working_answer.lower()
         for pattern in _CTA_PUSH_PATTERNS:
             if re.search(pattern, working_lower):
-                result.issues.append("cta_redirect_during_contact_collection")
-                result.needs_regeneration = True
-                result.regeneration_hint = (
-                    "The customer has already agreed to have the sales team reach out. "
-                    "Do not ask again if they want a quote or demo. Stay focused: ask for the next missing field "
-                    "(full name, email address, phone number, or business name)."
-                )
-                logger.info("Evaluator: flagged CTA redirect during CLOSE_QUOTE for regeneration")
+                # Auto-strip the offending sentence(s) — more reliable than regeneration
+                # because regeneration can produce non-JSON and fall back to the original
+                sentences = re.split(r'(?<=[.!?])\s+', working_answer.strip())
+                clean = [
+                    s for s in sentences
+                    if not any(re.search(p, s.lower()) for p in _CTA_PUSH_PATTERNS)
+                ]
+                if clean:
+                    result.auto_corrections["answer"] = " ".join(clean)
+                    result.issues.append("cta_redirect_during_contact_collection")
+                    result.has_issues = True
+                    logger.info("Evaluator: auto-stripped CTA redirect during CLOSE_QUOTE")
+                else:
+                    result.issues.append("cta_redirect_during_contact_collection")
+                    result.needs_regeneration = True
+                    result.regeneration_hint = (
+                        "The customer has already agreed to have the sales team reach out. "
+                        "Do not ask again if they want a quote or demo. Stay focused: ask for the next missing field "
+                        "(full name, email address, phone number, or business name)."
+                    )
+                    logger.info("Evaluator: flagged CTA redirect during CLOSE_QUOTE for regeneration")
                 break
 
     return result

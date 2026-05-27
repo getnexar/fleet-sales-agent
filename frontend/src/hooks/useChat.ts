@@ -105,7 +105,9 @@ export function useChat() {
         }),
       })
 
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data: ChatResponse = await res.json()
+      if (!data.answer) throw new Error('empty response')
 
       const assistantMsg: Message = {
         id: uuidv4(),
