@@ -19,6 +19,21 @@ FORBIDDEN_OPENERS = [
     "of course,", "great,", "sure,", "absolutely,",
 ]
 
+# Detects fleet size asks in assistant messages
+_FLEET_ASK_RE = re.compile(
+    r'\b(how many.{0,40}(vehicles|cars|trucks|fleet|cameras|units|dash.?cam)|'
+    r'fleet size|how large is your fleet|how many are you (looking at|considering))\b',
+    re.IGNORECASE
+)
+
+# Detects wrap-up confirmation language in agent responses
+_CONFIRMATION_WRAP_RE = re.compile(
+    r'(someone from.{0,40}(team|us) will (reach out|be in touch|contact)|'
+    r'(team|we).{0,20}(reach out|be in touch|follow up|contact you)|'
+    r"you.?re all set|all set[!.]|talk soon)",
+    re.IGNORECASE
+)
+
 # Patterns that indicate a CTA push (sales team reach out) in the answer text
 _CTA_PUSH_PATTERNS = [
     r"want me to.{0,50}(reach out|get back|follow up|team reach)",
@@ -230,6 +245,42 @@ def evaluate_response(
                     logger.info("Evaluator: flagged CTA redirect during CLOSE_QUOTE for regeneration")
                 break
 
+    # --- Check 6: Fleet size missing before wrap-up confirmation ---
+    if phase == ConversationPhase.CLOSE_QUOTE and not result.needs_regeneration and conversation_history:
+        working_answer = result.auto_corrections.get("answer", answer)
+        if _CONFIRMATION_WRAP_RE.search(working_answer):
+            known = _extract_known_fields(conversation_history)
+            lead_signals = parsed.get("lead_signals") or {}
+            fleet_known = (
+                bool(known.get("fleet_size"))
+                or bool(lead_signals.get("fleet_size"))
+                or bool(lead_signals.get("num_cameras"))
+            )
+            if not fleet_known:
+                fleet_asks = sum(
+                    1 for m in conversation_history
+                    if m.role == "assistant" and _FLEET_ASK_RE.search(m.content or "")
+                )
+                if fleet_asks == 0:
+                    result.needs_regeneration = True
+                    result.regeneration_hint = (
+                        "Before confirming the sales team handoff, you must collect fleet size. "
+                        "The customer hasn't mentioned how many vehicles they have or how many cameras they're considering. "
+                        "Say: 'Almost there — just need one more thing to make sure the team can come back to you with something useful. "
+                        "How many vehicles are in your fleet, or how many cameras are you looking at?'"
+                    )
+                    logger.info("Evaluator: blocked confirmation — fleet size missing (ask 1)")
+                elif fleet_asks == 1:
+                    result.needs_regeneration = True
+                    result.regeneration_hint = (
+                        "You already asked once for fleet size and the customer didn't provide it. "
+                        "Ask again with more context. Say: 'Totally understand if you're still figuring it out — "
+                        "even a rough number helps. Without it, the team won't be able to put together a real offer for you. "
+                        "How many vehicles are you working with, roughly?'"
+                    )
+                    logger.info("Evaluator: blocked confirmation — fleet size missing (ask 2)")
+                # fleet_asks >= 2: let through — main.py will default to 10
+
     return result
 
 
@@ -268,9 +319,9 @@ def _extract_known_fields(history: List) -> Dict[str, Optional[str]]:
     if re.search(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', user_text):
         known["contact_email"] = "provided"
 
-    # Fleet size: number followed by vehicle type
+    # Fleet size: number followed by vehicle or camera type
     if re.search(
-        r'\b\d+\s*(vehicle|truck|van|car|fleet|unit|bus|bike)',
+        r'\b\d+\s*(vehicle|truck|van|car|fleet|unit|bus|bike|camera|dash.?cam)',
         user_text,
         re.IGNORECASE,
     ):

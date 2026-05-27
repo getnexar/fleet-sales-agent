@@ -518,7 +518,13 @@ def _build_chatbot_summary(lead: dict, messages: list) -> str:
     lines = ["=== LEAD SUMMARY ==="]
 
     if lead.get("fleet_size"):
-        lines.append(f"Fleet size: {lead['fleet_size']} vehicles")
+        fleet_line = f"Fleet size: {lead['fleet_size']} vehicles"
+        if lead.get("fleet_size_defaulted"):
+            fleet_line += (
+                " — NOTE: fleet size was NOT provided by the customer. "
+                "Defaulted to 10 by the chatbot to push the lead through. Please validate during follow-up."
+            )
+        lines.append(fleet_line)
     if lead.get("industry"):
         lines.append(f"Industry: {lead['industry']}")
     if lead.get("pain_points"):
@@ -762,6 +768,22 @@ async def chat(request: ChatRequest, http_request: Request):
 
             # fleet_size is required by HubSpot; accept num_cameras as a proxy when absent
             _fleet_size_satisfied = current_lead.get("fleet_size") or current_lead.get("num_cameras")
+
+            # After 2 failed asks, default fleet_size to 10 so the lead isn't lost
+            if not _fleet_size_satisfied:
+                _FLEET_ASK_RE_MAIN = re.compile(
+                    r'\b(how many.{0,40}(vehicles|cars|trucks|fleet|cameras|units)|fleet size)\b',
+                    re.IGNORECASE
+                )
+                _fleet_ask_count = sum(
+                    1 for m in (request.conversation_history or [])
+                    if m.role == "assistant" and _FLEET_ASK_RE_MAIN.search(m.content or "")
+                )
+                if _fleet_ask_count >= 2:
+                    current_lead["fleet_size"] = "10"
+                    current_lead["fleet_size_defaulted"] = True
+                    _fleet_size_satisfied = True
+                    logger.info(f"Fleet size defaulted to 10 after {_fleet_ask_count} asks for session {_sid(request.session_id)}")
             _non_fleet_required = HUBSPOT_REQUIRED_FIELDS - {"fleet_size"}
 
             # Log what's missing so we can debug gate failures
