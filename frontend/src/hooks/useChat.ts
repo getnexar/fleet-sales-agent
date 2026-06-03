@@ -30,7 +30,13 @@ export function useChat() {
     {
       id: uuidv4(),
       role: 'assistant',
-      content: "Hi! I'm Alex, your Nexar Fleet assistant. I can help you learn about our dash cam solutions, pricing, and get you set up. What brings you here today?",
+      content: "Hey, I'm Alex, Nexar's fleet assistant.",
+      timestamp: new Date(),
+    },
+    {
+      id: uuidv4(),
+      role: 'assistant',
+      content: "Ask me anything you need — I can give you the scoop on pricing, specs and guide you through our solutions.",
       timestamp: new Date(),
     }
   ])
@@ -89,11 +95,6 @@ export function useChat() {
     setFollowUps([])
     setIsLoading(true)
 
-    // Build history for API (include greeting so Gemini knows it already introduced itself)
-    const history = messages
-      .slice(0)
-      .map(m => ({ role: m.role, content: m.content }))
-
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -101,7 +102,6 @@ export function useChat() {
         body: JSON.stringify({
           question: text,
           session_id: sessionId.current,
-          conversation_history: history,
         }),
       })
 
@@ -143,7 +143,7 @@ export function useChat() {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, clearNudgeTimer, startNudgeTimer])
+  }, [clearNudgeTimer, startNudgeTimer])
 
   const submitFeedback = useCallback(async (
     messageId: string,

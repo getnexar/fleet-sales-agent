@@ -4,6 +4,7 @@ Allows updating content without redeployment.
 """
 import json
 import os
+import time
 import logging
 from typing import List, Dict, Optional
 from google.cloud import storage
@@ -12,17 +13,28 @@ logger = logging.getLogger(__name__)
 
 # Fallback: load from local config/ folder if GCS unavailable
 LOCAL_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
+DEFAULT_AGENT_CONTEXT = {"business_context": "", "escalations": "", "tone_style": "", "dos_donts": ""}
+
+# Re-read config from GCS every 5 minutes so all instances pick up changes
+_CACHE_TTL_SECONDS = 300
 
 
 class StorageService:
     """Loads agent config (FAQs + instructions) from GCS bucket."""
 
     def __init__(self):
-        self.bucket_name = os.environ.get("GCS_CONFIG_BUCKET", "fleet-sales-agent-config")
+        # NAP auto-provisions bucket: {project-id}-{app-id}-storage
+        # Derive from runtime env vars; fall back to explicit override if set.
+        _project = os.environ.get("GOOGLE_CLOUD_PROJECT", "nexar-corp-systems")
+        _service = os.environ.get("K_SERVICE", "fleet-sales-agent")
+        self.bucket_name = os.environ.get("GCS_CONFIG_BUCKET", f"{_project}-{_service}-storage")
         self._faqs: Optional[List[Dict]] = None
+        self._faqs_expires: float = 0
         self._instructions: Optional[str] = None
         self._core_prompt: Optional[str] = None
         self._phase_prompts: Optional[Dict[str, str]] = None
+        self._agent_context: Optional[Dict[str, str]] = None
+        self._agent_context_expires: float = 0
 
         try:
             self.client = storage.Client()
@@ -32,9 +44,10 @@ class StorageService:
             self.client = None
 
     def get_faqs(self) -> List[Dict]:
-        """Load FAQs from GCS (cached after first load)."""
-        if self._faqs is not None:
+        """Load FAQs from GCS (TTL-cached so all instances pick up changes within 5 min)."""
+        if self._faqs is not None and time.time() < self._faqs_expires:
             return self._faqs
+        self._faqs = None
 
         try:
             if self.client:
@@ -42,6 +55,7 @@ class StorageService:
                 blob = bucket.blob("faqs_core_28_final.json")
                 content = blob.download_as_text()
                 self._faqs = json.loads(content)
+                self._faqs_expires = time.time() + _CACHE_TTL_SECONDS
                 logger.info(f"Loaded {len(self._faqs)} FAQs from GCS")
             else:
                 raise Exception("No GCS client")
@@ -117,7 +131,38 @@ class StorageService:
             json.dumps(faqs, indent=2), content_type="application/json"
         )
         self._faqs = None
+        self._faqs_expires = 0
         logger.info(f"Saved {len(faqs)} FAQs to GCS")
+
+    def get_agent_context(self) -> Dict[str, str]:
+        """Load sales-team agent context from GCS. Returns defaults if not yet saved."""
+        if self._agent_context is not None and time.time() < self._agent_context_expires:
+            return self._agent_context
+        self._agent_context = None
+        try:
+            if self.client:
+                bucket = self.client.bucket(self.bucket_name)
+                blob = bucket.blob("agent_context.json")
+                if blob.exists():
+                    self._agent_context = json.loads(blob.download_as_text())
+                    self._agent_context_expires = time.time() + _CACHE_TTL_SECONDS
+                    logger.info("Loaded agent context from GCS")
+                    return self._agent_context
+        except Exception as e:
+            logger.warning(f"GCS agent context load failed: {e}")
+        return DEFAULT_AGENT_CONTEXT.copy()
+
+    def save_agent_context(self, context: Dict[str, str]) -> None:
+        """Write agent context JSON to GCS and invalidate cache."""
+        if not self.client:
+            raise RuntimeError("GCS client unavailable")
+        bucket = self.client.bucket(self.bucket_name)
+        bucket.blob("agent_context.json").upload_from_string(
+            json.dumps(context, indent=2), content_type="application/json"
+        )
+        self._agent_context = None
+        self._agent_context_expires = 0
+        logger.info("Saved agent context to GCS")
 
     def save_prompts(self, core_prompt: str, phase_prompts: Dict[str, str]) -> None:
         """Write core prompt and phase prompts to GCS and invalidate caches."""
@@ -146,4 +191,5 @@ class StorageService:
         self._instructions = None
         self._core_prompt = None
         self._phase_prompts = None
+        self._agent_context = None
         logger.info("Config cache cleared - will reload from GCS on next request")

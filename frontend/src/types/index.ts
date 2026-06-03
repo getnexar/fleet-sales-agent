@@ -104,3 +104,49 @@ export interface AdminConfig {
   core_prompt: string
   phase_prompts: Record<string, string>
 }
+
+export interface AgentContext {
+  business_context: string
+  escalations: string
+  tone_style: string
+  dos_donts: string
+}
+
+export interface FeedbackSuggestion {
+  type: 'instruction' | 'faq'
+  // instruction-specific
+  field?: 'dos_donts' | 'tone_style' | 'escalations' | 'business_context'
+  field_label?: string
+  addition?: string
+  // faq-specific
+  question?: string
+  answer?: string
+  category?: string | null
+  // shared
+  is_duplicate: boolean
+  duplicate_hint: string
+}
+
+export interface AdminStats {
+  total_conversations: number
+  leads_with_contact: number
+  hubspot_submitted: number
+  fleet_size_distribution: { range: string; count: number }[]
+  camera_interest: { model: string; count: number }[]
+  plan_interest: { plan: string; count: number }[]
+  monthly_leads: { month: string; count: number }[]
+}
+
+export interface LeadRecord {
+  session_id?: string
+  contact_name?: string
+  contact_email?: string
+  contact_phone?: string
+  business_name?: string
+  fleet_size?: number
+  industry?: string
+  hubspot_submitted?: boolean
+  created_at?: unknown
+  updated_at?: unknown
+  status?: string
+}

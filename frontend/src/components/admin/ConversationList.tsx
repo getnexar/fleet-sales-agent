@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { ConversationSummary, ConversationDetail, ConversationMessage } from '../../types'
 import { useConversations, useConversationDetail } from '../../hooks/useAdmin'
+import FeedbackSuggestionModal from './FeedbackSuggestionModal'
 
 function formatTs(ts: unknown): string {
   if (!ts) return '—'
@@ -89,6 +90,8 @@ function ConversationDetailPanel({
   const [notes, setNotes] = useState('')
   const [ratingSubmitted, setRatingSubmitted] = useState(false)
   const [ratingError, setRatingError] = useState<string | null>(null)
+  const [suggestionType, setSuggestionType] = useState<'instruction' | 'faq' | null>(null)
+  const [suggestionAdded, setSuggestionAdded] = useState<'instruction' | 'faq' | null>(null)
 
   useEffect(() => {
     load(sessionId)
@@ -243,12 +246,69 @@ function ConversationDetailPanel({
             {ratingError && <div style={{ color: '#ef4444', fontSize: 12, marginTop: 6 }}>{ratingError}</div>}
             {ratingSubmitted && rating === 'thumbs_down' && (
               <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginTop: 6 }}>
-                AI triage running in background — check Feedback tab in a moment.
+                AI triage running in background.
+              </div>
+            )}
+
+            {/* Apply feedback CTAs — shown for any thumbs-down conversation */}
+            {rating === 'thumbs_down' && (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 8 }}>
+                  Apply this feedback to improve the agent:
+                </div>
+                {suggestionAdded ? (
+                  <div style={{ fontSize: 12, color: '#16a34a', fontWeight: 500 }}>
+                    ✓ Added to {suggestionAdded === 'instruction' ? 'agent instructions' : 'FAQ knowledge base'}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => setSuggestionType('instruction')}
+                      style={{
+                        padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                        border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--foreground)',
+                        transition: 'background .1s',
+                      }}
+                    >
+                      Add to agent instructions
+                    </button>
+                    <button
+                      onClick={() => setSuggestionType('faq')}
+                      style={{
+                        padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                        border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--foreground)',
+                        transition: 'background .1s',
+                      }}
+                    >
+                      Add as FAQ
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </>
       )}
+
+      {/* Suggestion modal */}
+      {suggestionType && detail && (() => {
+        const msgs = detail.messages || []
+        const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant')
+        const lastUser = [...msgs].reverse().find(m => m.role === 'user')
+        return (
+          <FeedbackSuggestionModal
+            type={suggestionType}
+            notes={notes}
+            question={lastUser?.content || ''}
+            answer={lastAssistant?.content || ''}
+            onClose={() => setSuggestionType(null)}
+            onSuccess={(t) => {
+              setSuggestionType(null)
+              setSuggestionAdded(t)
+            }}
+          />
+        )
+      })()}
     </div>
   )
 }

@@ -340,6 +340,110 @@ class FirestoreService:
         except Exception as e:
             logger.error(f"Failed to update feedback triage: {e}")
 
+    async def count_stats(self) -> Dict:
+        """Return aggregate counts and distributions for the admin dashboard."""
+        try:
+            import asyncio
+            from datetime import timezone
+            loop = asyncio.get_event_loop()
+
+            def _query():
+                total_convos = sum(1 for _ in self.db.collection("fleet_conversations").limit(5000).stream())
+                lead_docs = [d.to_dict() for d in self.db.collection("fleet_leads").limit(5000).stream()]
+
+                contact_fields = {"contact_name", "contact_email", "contact_phone", "business_name"}
+                leads_with_contact = sum(1 for d in lead_docs if any(d.get(f) for f in contact_fields))
+                hs_submitted = sum(1 for d in lead_docs if d.get("hubspot_submitted"))
+
+                # Fleet size distribution
+                size_bins: Dict[str, int] = {"1–10": 0, "11–25": 0, "26–50": 0, "51–100": 0, "100+": 0}
+                for d in lead_docs:
+                    fs = d.get("fleet_size")
+                    if fs is None:
+                        continue
+                    try:
+                        n = int(float(str(fs)))
+                    except (ValueError, TypeError):
+                        continue
+                    if n <= 10:
+                        size_bins["1–10"] += 1
+                    elif n <= 25:
+                        size_bins["11–25"] += 1
+                    elif n <= 50:
+                        size_bins["26–50"] += 1
+                    elif n <= 100:
+                        size_bins["51–100"] += 1
+                    else:
+                        size_bins["100+"] += 1
+                fleet_size_dist = [{"range": k, "count": v} for k, v in size_bins.items() if v > 0]
+
+                # Camera model interest
+                camera_counts: Dict[str, int] = {}
+                for d in lead_docs:
+                    m = d.get("camera_model")
+                    if m:
+                        camera_counts[m] = camera_counts.get(m, 0) + 1
+                camera_interest = [{"model": k, "count": v} for k, v in sorted(camera_counts.items(), key=lambda x: -x[1])]
+
+                # Plan type interest
+                plan_labels = {"no-contract": "No Contract", "1-year": "1 Year", "2-year": "2 Years", "3-year": "3 Years"}
+                plan_counts: Dict[str, int] = {}
+                for d in lead_docs:
+                    p = d.get("subscription_plan")
+                    if p:
+                        label = plan_labels.get(p, p)
+                        plan_counts[label] = plan_counts.get(label, 0) + 1
+                plan_interest = [{"plan": k, "count": v} for k, v in sorted(plan_counts.items(), key=lambda x: -x[1])]
+
+                # Monthly leads — last 6 calendar months
+                now = datetime.now(timezone.utc)
+                months: Dict[str, int] = {}
+                for i in range(5, -1, -1):
+                    m = now.month - i
+                    y = now.year
+                    while m <= 0:
+                        m += 12
+                        y -= 1
+                    key = datetime(y, m, 1).strftime("%b %Y")
+                    months[key] = 0
+
+                for d in lead_docs:
+                    created = d.get("created_at")
+                    if not created:
+                        continue
+                    try:
+                        if hasattr(created, 'seconds'):
+                            dt = datetime.fromtimestamp(created.seconds, tz=timezone.utc)
+                        elif isinstance(created, datetime):
+                            dt = created.astimezone(timezone.utc)
+                        else:
+                            continue
+                        key = dt.strftime("%b %Y")
+                        if key in months:
+                            months[key] += 1
+                    except Exception:
+                        pass
+
+                monthly_leads = [{"month": k, "count": v} for k, v in months.items()]
+
+                return {
+                    "total_conversations": total_convos,
+                    "leads_with_contact": leads_with_contact,
+                    "hubspot_submitted": hs_submitted,
+                    "fleet_size_distribution": fleet_size_dist,
+                    "camera_interest": camera_interest,
+                    "plan_interest": plan_interest,
+                    "monthly_leads": monthly_leads,
+                }
+
+            return await loop.run_in_executor(None, _query)
+        except Exception as e:
+            logger.error(f"Failed to count stats: {e}")
+            return {
+                "total_conversations": 0, "leads_with_contact": 0, "hubspot_submitted": 0,
+                "fleet_size_distribution": [], "camera_interest": [], "plan_interest": [], "monthly_leads": [],
+            }
+
     # ─── Distributed Rate Limiting ────────────────────────────────────────────
 
     async def check_and_increment_rate_limit(

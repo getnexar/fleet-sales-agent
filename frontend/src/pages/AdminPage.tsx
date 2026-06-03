@@ -1,11 +1,10 @@
 import { useState } from 'react'
+import Dashboard from '../components/admin/Dashboard'
 import ConversationList from '../components/admin/ConversationList'
-import FeedbackPanel from '../components/admin/FeedbackPanel'
 import ConfigEditor from '../components/admin/ConfigEditor'
 
-type Tab = 'conversations' | 'feedback' | 'config'
+type Tab = 'dashboard' | 'conversations' | 'config'
 
-// When navigating from a triage badge, we pass resource + detail to jump to the right section
 interface ConfigTarget {
   resource: string
   detail: string
@@ -13,7 +12,7 @@ interface ConfigTarget {
 }
 
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('conversations')
+  const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [configTarget, setConfigTarget] = useState<ConfigTarget | null>(null)
 
   function navigateToConfig(resource: string, detail: string) {
@@ -27,7 +26,7 @@ export default function AdminPage() {
       minHeight: '100vh',
       background: 'var(--background)',
       color: 'var(--foreground)',
-      fontFamily: 'var(--font-body, system-ui, sans-serif)',
+      fontFamily: 'var(--font-sans, system-ui, sans-serif)',
     }}>
       {/* Top nav */}
       <div style={{
@@ -38,15 +37,18 @@ export default function AdminPage() {
         alignItems: 'center',
         gap: 32,
         height: 52,
+        position: 'sticky',
+        top: 0,
+        zIndex: 10,
       }}>
-        <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: '-0.02em', marginRight: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: '-0.02em', marginRight: 16, fontFamily: 'var(--font-heading)' }}>
           Nexar Fleet <span style={{ color: 'var(--muted-foreground)', fontWeight: 400 }}>Admin</span>
         </div>
 
         {([
+          { key: 'dashboard', label: 'Dashboard' },
           { key: 'conversations', label: 'Conversations' },
-          { key: 'feedback', label: 'Feedback' },
-          { key: 'config', label: 'Config' },
+          { key: 'config', label: 'Agent Overview' },
         ] as { key: Tab; label: string }[]).map(tab => (
           <button
             key={tab.key}
@@ -82,19 +84,17 @@ export default function AdminPage() {
       </div>
 
       {/* Content */}
-      <div style={{ maxWidth: 900, margin: '0 auto', padding: '28px 24px' }}>
+      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '28px 24px' }}>
+        {activeTab === 'dashboard' && <Dashboard />}
+
         {activeTab === 'conversations' && (
           <ConversationList onNavigateConfig={navigateToConfig} />
-        )}
-
-        {activeTab === 'feedback' && (
-          <FeedbackPanel onNavigateConfig={navigateToConfig} />
         )}
 
         {activeTab === 'config' && (
           <ConfigEditor
             key={configTarget ? `${configTarget.resource}:${configTarget.detail}` : 'default'}
-            initialTab={configTarget?.tab}
+            initialTab={configTarget?.tab === 'faqs' ? 'faqs' : 'context'}
             highlightResource={configTarget?.resource}
             highlightDetail={configTarget?.detail}
           />

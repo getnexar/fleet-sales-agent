@@ -3,8 +3,86 @@ import type {
   ConversationSummary,
   ConversationDetail,
   FeedbackItem,
+  FeedbackSuggestion,
   AdminConfig,
+  AgentContext,
+  AdminStats,
+  LeadRecord,
 } from '../types'
+
+// ─── Current User ─────────────────────────────────────────────────────────────
+
+export function useCurrentUser() {
+  const [email, setEmail] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    if (email) return email
+    setLoading(true)
+    try {
+      const res = await fetch('/api/admin/me')
+      if (!res.ok) return null
+      const data = await res.json()
+      setEmail(data.email)
+      return data.email as string
+    } catch {
+      return null
+    } finally {
+      setLoading(false)
+    }
+  }, [email])
+
+  return { email, loading, load }
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+export function useAdminStats() {
+  const [stats, setStats] = useState<AdminStats | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/stats')
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      setStats(await res.json())
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return { stats, loading, error, load }
+}
+
+// ─── Leads (for dashboard list) ───────────────────────────────────────────────
+
+export function useLeads() {
+  const [leads, setLeads] = useState<LeadRecord[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async (limit = 200) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/admin/leads?limit=${limit}`)
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const data = await res.json()
+      setLeads(data.leads)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return { leads, loading, error, load }
+}
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 
@@ -94,7 +172,55 @@ export function useThumbsDownFeedback() {
   return { feedback, loading, error, load }
 }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+// ─── Agent Context ────────────────────────────────────────────────────────────
+
+export function useAgentContext() {
+  const [context, setContext] = useState<AgentContext | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/config/context')
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      setContext(await res.json())
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const save = useCallback(async (ctx: AgentContext) => {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/config/context', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ctx),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `${res.status} ${res.statusText}`)
+      }
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }, [])
+
+  return { context, loading, saving, saved, error, load, save }
+}
+
+// ─── Config (FAQs + Raw Prompts) ──────────────────────────────────────────────
 
 export function useAdminConfig() {
   const [config, setConfig] = useState<AdminConfig | null>(null)
@@ -139,6 +265,8 @@ export function useAdminConfig() {
   const savePrompts = useCallback(async (
     corePrompt: string,
     phasePrompts: Record<string, string>,
+    changeReason: string,
+    confirmedBy: string,
   ) => {
     setSaving(true)
     setError(null)
@@ -146,9 +274,17 @@ export function useAdminConfig() {
       const res = await fetch('/api/admin/config/prompts', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ core_prompt: corePrompt, phase_prompts: phasePrompts }),
+        body: JSON.stringify({
+          core_prompt: corePrompt,
+          phase_prompts: phasePrompts,
+          change_reason: changeReason,
+          confirmed_by: confirmedBy,
+        }),
       })
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `${res.status} ${res.statusText}`)
+      }
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
     } catch (e) {
@@ -159,4 +295,37 @@ export function useAdminConfig() {
   }, [])
 
   return { config, loading, saving, saved, error, load, saveFaqs, savePrompts }
+}
+
+// ─── Feedback → Agent Suggestion ──────────────────────────────────────────────
+
+export function useFeedbackSuggest() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const suggest = useCallback(async (
+    type: 'instruction' | 'faq',
+    notes: string,
+    question: string,
+    answer: string,
+  ): Promise<FeedbackSuggestion> => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/feedback/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, notes, question, answer }),
+      })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      return await res.json()
+    } catch (e) {
+      setError(String(e))
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return { loading, error, suggest }
 }

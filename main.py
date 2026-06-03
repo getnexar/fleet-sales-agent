@@ -188,6 +188,13 @@ if HUBSPOT_FORM_ID and not re.fullmatch(r'[0-9A-Za-z_-]{1,80}', HUBSPOT_FORM_ID)
 HUBSPOT_RETRY_LIMIT = max(1, min(10, int(os.environ.get("HUBSPOT_RETRY_LIMIT", "3"))))
 HUBSPOT_RETRY_COOLDOWN_SECONDS = max(60, min(86400, int(os.environ.get("HUBSPOT_RETRY_COOLDOWN_SECONDS", "900"))))
 
+_hs_configured = bool(HUBSPOT_PORTAL_ID and HUBSPOT_FORM_ID)
+logger.info(
+    f"HubSpot integration: configured={_hs_configured} "
+    f"(portal={'set' if HUBSPOT_PORTAL_ID else 'MISSING'}, "
+    f"form={'set' if HUBSPOT_FORM_ID else 'MISSING'})"
+)
+
 _SUBSCRIPTION_LABELS = {
     "no-contract": "$25/mo (no contract)",
     "1-year": "1-year plan ($19.99/mo)",
@@ -435,9 +442,17 @@ def _sanitize_lead_for_downstream(lead: dict) -> dict:
 
 def _client_rate_limit_key(request: Request) -> str:
     """Hash client IP into a stable, non-reversible key for public endpoint limits."""
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    # The trusted platform ingress appends its observed client IP at the end.
-    client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
+    if os.environ.get("APP_ENV") == "production":
+        # In production, the NAP ingress is the sole entity that appends to X-Forwarded-For.
+        # XFF is not accessible to external actors without going through the ingress,
+        # so the last entry in the chain is the authoritative client IP.
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
+    else:
+        # Outside production, do not trust XFF — use the direct socket address so
+        # local tests and staging deployments cannot spoof IPs via crafted headers.
+        client_ip = ""
+
     if not client_ip and request.client:
         client_ip = request.client.host or ""
     client_ip = re.sub(r'[^\x20-\x7e]', '', client_ip)[:45]
@@ -738,6 +753,12 @@ async def chat(request: ChatRequest, http_request: Request):
         # Always fetch current lead state — needed for Slack + HubSpot checks regardless of new signals
         current_lead = await firestore_service.get_lead(request.session_id)
 
+        if not current_lead and phase_str == "CLOSE_QUOTE":
+            logger.warning(
+                f"CLOSE_QUOTE but current_lead is None (Firestore upsert may have failed) "
+                f"for session {_sid(request.session_id)}"
+            )
+
         if current_lead:
             # Check if we have enough info to notify Slack
             if SLACK_NOTIFICATIONS_ENABLED and not current_lead.get("slack_notified"):
@@ -765,27 +786,34 @@ async def chat(request: ChatRequest, http_request: Request):
                 or cta_type == "quote"
                 or lead_signals.get("order_intent") == "HIGH"
             )
+            if not wants_sales_followup and phase_str != "CONNECT":
+                logger.debug(
+                    f"HubSpot gate skipped: wants_followup=False phase={phase_str} cta={cta_type} "
+                    f"for session {_sid(request.session_id)}"
+                )
 
             # fleet_size is required by HubSpot; accept num_cameras as a proxy when absent
             _fleet_size_satisfied = current_lead.get("fleet_size") or current_lead.get("num_cameras")
+            _non_fleet_required = HUBSPOT_REQUIRED_FIELDS - {"fleet_size"}
 
-            # After 2 failed asks, default fleet_size to 10 so the lead isn't lost
-            if not _fleet_size_satisfied:
+            # If contact info is complete but fleet size is missing, default to 10 so the
+            # lead is never lost. Note it in Firestore so the summary flags it for the sales rep.
+            if not _fleet_size_satisfied and wants_sales_followup and all(current_lead.get(f) for f in _non_fleet_required):
                 _FLEET_ASK_RE_MAIN = re.compile(
                     r'\b(how many.{0,40}(vehicles|cars|trucks|fleet|cameras|units)|fleet size)\b',
                     re.IGNORECASE
                 )
                 _fleet_ask_count = sum(
-                    1 for m in (request.conversation_history or [])
+                    1 for m in clean_history
                     if m.role == "assistant" and _FLEET_ASK_RE_MAIN.search(m.content or "")
                 )
-                if _fleet_ask_count >= 2:
-                    current_lead["fleet_size"] = "10"
-                    current_lead["fleet_size_defaulted"] = True
-                    _fleet_size_satisfied = True
-                    logger.info(f"Fleet size defaulted to 10 after {_fleet_ask_count} asks for session {_sid(request.session_id)}")
-            _non_fleet_required = HUBSPOT_REQUIRED_FIELDS - {"fleet_size"}
-
+                current_lead["fleet_size"] = "10"
+                current_lead["fleet_size_defaulted"] = True
+                _fleet_size_satisfied = True
+                logger.info(
+                    f"Fleet size defaulted to 10 (contact complete, fleet_asks={_fleet_ask_count}) "
+                    f"for session {_sid(request.session_id)}"
+                )
             # Log what's missing so we can debug gate failures
             if wants_sales_followup and not current_lead.get("hubspot_submitted"):
                 missing = [f for f in _non_fleet_required if not current_lead.get(f)]
@@ -793,6 +821,14 @@ async def chat(request: ChatRequest, http_request: Request):
                     missing.append("fleet_size (or num_cameras)")
                 if missing:
                     logger.info(f"HubSpot gate: missing fields {missing} for session {_sid(request.session_id)}")
+                else:
+                    logger.info(
+                        f"HubSpot gate: all required fields present, "
+                        f"hs_configured={bool(HUBSPOT_PORTAL_ID and HUBSPOT_FORM_ID)}, "
+                        f"retry_due={_hubspot_retry_due(current_lead)}, "
+                        f"permanently_failed={current_lead.get('hubspot_permanently_failed', False)} "
+                        f"for session {_sid(request.session_id)}"
+                    )
 
             # HubSpot: submit to inbound_smb_fleets form when all required fields present
             if (
@@ -833,6 +869,24 @@ async def chat(request: ChatRequest, http_request: Request):
                     hs_email = (safe_lead.get("contact_email") or "")[:254]
                     hs_phone = (safe_lead.get("contact_phone") or "")[:20]
                     hs_company = (safe_lead.get("business_name") or "")[:200]
+
+                    # Final format gate before external transmission.
+                    # Email and phone were validated when extracted from LLM output, but we
+                    # re-check here as a last defense against unexpected Firestore mutations.
+                    if not re.fullmatch(
+                        r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', hs_email
+                    ):
+                        logger.warning(
+                            f"HubSpot blocked: invalid email format after sanitization "
+                            f"for session {_sid(request.session_id)}"
+                        )
+                        raise ValueError("Email failed final format check before HubSpot submission")
+                    if hs_phone and not re.fullmatch(r'[\d\s\+\-\.\(\)]{7,20}', hs_phone):
+                        logger.warning(
+                            f"HubSpot blocked: invalid phone format after sanitization "
+                            f"for session {_sid(request.session_id)}"
+                        )
+                        raise ValueError("Phone failed final format check before HubSpot submission")
 
                     hs_fields = [
                         {"name": "firstname",           "value": firstname},
@@ -982,6 +1036,19 @@ async def submit_feedback(request: FeedbackRequest):
         return FeedbackResponse(success=False, message="Unable to save feedback.")
 
 
+
+
+@app.get("/api/admin/me")
+async def admin_me(user: str = Depends(require_corp)):
+    """Return the authenticated corp user's email."""
+    return {"email": user}
+
+
+@app.get("/api/admin/stats")
+async def admin_stats(user: str = Depends(require_corp)):
+    """Return aggregate counts for the dashboard (conversations, leads, HubSpot submissions)."""
+    stats = await firestore_service.count_stats()
+    return stats
 
 
 @app.post("/api/admin/reload-config")
@@ -1148,7 +1215,97 @@ async def get_thumbs_down_feedback(limit: int = Query(default=100, ge=1, le=500)
     return {"feedback": feedback, "count": len(feedback)}
 
 
+# ─── Admin: Feedback → agent suggestion ──────────────────────────────────────
+
+class FeedbackSuggestRequest(BaseModel):
+    type: Literal["instruction", "faq"]
+    notes: str = Field(default="", max_length=2000)
+    question: str = Field(default="", max_length=2000)
+    answer: str = Field(default="", max_length=5000)
+
+
+_VALID_SUGGESTION_FIELDS = {"dos_donts", "tone_style", "escalations", "business_context"}
+
+
+@app.post("/api/admin/feedback/suggest")
+async def suggest_from_feedback(
+    request: FeedbackSuggestRequest,
+    user: str = Depends(require_prompt_admin),
+):
+    """Generate an agent instruction or FAQ suggestion from admin feedback (no saving — preview only)."""
+    question = chat_service._sanitize_input(request.question)
+    answer = chat_service._sanitize_input(request.answer[:2000])
+    notes = chat_service._sanitize_input(request.notes)
+
+    current_context = storage.get_agent_context()
+    faq_titles = [f.get("question", "") for f in storage.get_faqs()]
+
+    result = await chat_service.generate_feedback_suggestion(
+        suggestion_type=request.type,
+        question=question,
+        answer=answer,
+        admin_notes=notes,
+        current_context=current_context,
+        faq_titles=faq_titles,
+    )
+
+    # Validate LLM output fields
+    if request.type == "instruction":
+        if result.get("field") not in _VALID_SUGGESTION_FIELDS:
+            result["field"] = "dos_donts"
+            result["field_label"] = "Dos & Don'ts"
+        result["addition"] = str(result.get("addition") or notes)[:1000]
+        result["is_duplicate"] = bool(result.get("is_duplicate"))
+        result["duplicate_hint"] = str(result.get("duplicate_hint") or "")[:500]
+    else:
+        result["question"] = str(result.get("question") or question)[:500]
+        result["answer"] = str(result.get("answer") or notes)[:2000]
+        result["category"] = str(result.get("category") or "") or None
+        result["is_duplicate"] = bool(result.get("is_duplicate"))
+        result["duplicate_hint"] = str(result.get("duplicate_hint") or "")[:500]
+
+    return result
+
+
 # ─── Admin: Config (FAQ + prompts) ───────────────────────────────────────────
+
+@app.get("/api/admin/config/context")
+async def get_agent_context(user: str = Depends(require_prompt_admin)):
+    """Get the sales-team-editable agent context (business context, tone, dos/don'ts)."""
+    return storage.get_agent_context()
+
+
+class AgentContextUpdate(BaseModel):
+    business_context: str = Field(default="", max_length=5000)
+    escalations: str = Field(default="", max_length=5000)
+    tone_style: str = Field(default="", max_length=5000)
+    dos_donts: str = Field(default="", max_length=5000)
+
+
+@app.put("/api/admin/config/context")
+async def update_agent_context(request: AgentContextUpdate, user: str = Depends(require_prompt_admin)):
+    """Save the agent context block (injected into system prompt at runtime)."""
+    for field_name, value in [
+        ("business_context", request.business_context),
+        ("escalations", request.escalations),
+        ("tone_style", request.tone_style),
+        ("dos_donts", request.dos_donts),
+    ]:
+        if value:
+            _validate_prompt_content(value, field_name)
+    try:
+        logger.warning(f"CONFIG_CHANGE: {user} updated agent context")
+        storage.save_agent_context({
+            "business_context": request.business_context,
+            "escalations": request.escalations,
+            "tone_style": request.tone_style,
+            "dos_donts": request.dos_donts,
+        })
+        return {"status": "ok", "message": "Agent context saved and cache reloaded."}
+    except Exception as e:
+        logger.error(f"Agent context update error: {e}")
+        raise HTTPException(status_code=503, detail="Failed to save agent context — storage error")
+
 
 @app.get("/api/admin/config")
 async def get_config(user: str = Depends(require_prompt_admin)):
@@ -1197,11 +1354,11 @@ async def update_faqs(request: ConfigFaqsUpdate, user: str = Depends(require_pro
         _validate_prompt_content(faq.source or "", f"faqs[{idx}].source")
     try:
         logger.warning(f"CONFIG_CHANGE: {user} updated FAQs ({len(request.faqs)} entries)")
-        storage.save_faqs(request.faqs)
+        storage.save_faqs([faq.model_dump() for faq in request.faqs])
         return {"status": "ok", "message": f"Saved {len(request.faqs)} FAQs and reloaded cache."}
-    except RuntimeError as e:
-        logger.error(f"Config update error: {e}")
-        raise HTTPException(status_code=503, detail="Service unavailable")
+    except Exception as e:
+        logger.error(f"FAQ update error: {e}")
+        raise HTTPException(status_code=503, detail="Failed to save FAQs — storage error")
 
 
 _PROMPT_FORBIDDEN_PATTERNS = [

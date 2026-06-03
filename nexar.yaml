@@ -45,7 +45,7 @@ capabilities:
 env:
   APP_ENV: production
   LOG_LEVEL: INFO
-  GCS_CONFIG_BUCKET: fleet-sales-agent-config
+  GCS_CONFIG_BUCKET: nexar-corp-systems-fleet-sales-agent-storage
   SLACK_CHANNEL: fleet-sales-bot
   SLACK_NOTIFICATIONS_ENABLED: "false"
   MAX_CONVERSATION_LENGTH: 20

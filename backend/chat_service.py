@@ -168,6 +168,23 @@ class ChatService:
         core_template = self._sanitize_prompt(raw_core) if raw_core else CORE_PROMPT_TEMPLATE
         core = core_template.format(faqs=faq_text.strip())
 
+        # Inject sales-team-managed context block (business context, tone, dos/don'ts).
+        # Sanitize before injection — same treatment as GCS-managed prompts.
+        agent_context = self.storage.get_agent_context()
+        context_parts = []
+        if agent_context.get("business_context", "").strip():
+            context_parts.append(f"### Business Context\n{self._sanitize_prompt(agent_context['business_context'])}")
+        if agent_context.get("escalations", "").strip():
+            context_parts.append(f"### Escalations\n{self._sanitize_prompt(agent_context['escalations'])}")
+        if agent_context.get("tone_style", "").strip():
+            context_parts.append(f"### Response Tone & Style\n{self._sanitize_prompt(agent_context['tone_style'])}")
+        if agent_context.get("dos_donts", "").strip():
+            context_parts.append(f"### Capabilities: Dos & Don'ts\n{self._sanitize_prompt(agent_context['dos_donts'])}")
+        context_block = (
+            "\n\n## Sales Team Context\n" + "\n\n".join(context_parts)
+            if context_parts else ""
+        )
+
         gcs_phase_prompts = self.storage.get_phase_prompts()
         if gcs_phase_prompts and phase.value in gcs_phase_prompts:
             phase_section = self._sanitize_prompt(gcs_phase_prompts[phase.value])
@@ -181,7 +198,7 @@ class ChatService:
         )
         return (
             f"{SECURITY_BOUNDARY_PROMPT}\n\n"
-            f"{core}\n\n## Current Conversation Phase: {phase.value}\n{phase_section}{json_reminder}"
+            f"{core}{context_block}\n\n## Current Conversation Phase: {phase.value}\n{phase_section}{json_reminder}"
         )
 
     def _call_claude(self, messages: list, system_prompt: str) -> str:
@@ -247,6 +264,97 @@ Respond with ONLY valid JSON (no markdown, no code fences):
                 "resource": "unknown",
                 "detail": "Could not classify — review manually",
                 "reasoning": str(e),
+            }
+
+    async def generate_feedback_suggestion(
+        self,
+        suggestion_type: str,
+        question: str,
+        answer: str,
+        admin_notes: str,
+        current_context: dict,
+        faq_titles: list,
+    ) -> dict:
+        """
+        Generate an agent instruction or FAQ entry from admin feedback.
+        suggestion_type: "instruction" | "faq"
+        Returns structured suggestion dict ready for admin preview.
+        """
+        if suggestion_type == "instruction":
+            ctx = current_context
+            prompt = f"""You are helping improve a sales chatbot's agent instructions based on admin feedback.
+
+Conversation that triggered the feedback:
+User question: {question}
+Bot response: {answer}
+Admin notes on what should have been different: {admin_notes}
+
+Current agent context sections:
+[business_context]: {ctx.get("business_context", "")}
+[escalations]: {ctx.get("escalations", "")}
+[tone_style]: {ctx.get("tone_style", "")}
+[dos_donts]: {ctx.get("dos_donts", "")}
+
+Task: Write a short, clear instruction to add to the agent based on this feedback.
+Decide which section fits best. Generate only the new text to append (not a rewrite of the full section).
+Also check whether very similar guidance already exists in that section.
+
+Respond with ONLY valid JSON (no markdown, no code fences):
+{{
+  "field": "dos_donts" | "tone_style" | "escalations" | "business_context",
+  "field_label": "Dos & Don'ts" | "Tone & Style" | "Escalation Rules" | "Business Context",
+  "addition": "<the new instruction text to append>",
+  "is_duplicate": true | false,
+  "duplicate_hint": "<if similar content exists, quote the existing text; otherwise empty string>"
+}}"""
+        else:
+            faq_list = "\n".join(f"- {t}" for t in faq_titles[:100])
+            prompt = f"""You are helping improve a sales chatbot's FAQ knowledge base based on admin feedback.
+
+Conversation that triggered the feedback:
+User question: {question}
+Bot response: {answer}
+Admin notes on the correct answer: {admin_notes}
+
+Existing FAQ questions (check for duplicates):
+{faq_list}
+
+Task: Create a FAQ entry. The question should match natural user phrasing; the answer should be the correct bot response in a helpful, concise tone.
+Check if a very similar FAQ already exists in the list above.
+
+Respond with ONLY valid JSON (no markdown, no code fences):
+{{
+  "question": "<natural user question>",
+  "answer": "<clear, correct bot response>",
+  "category": "<optional short category label or null>",
+  "is_duplicate": true | false,
+  "duplicate_hint": "<if a similar FAQ exists, quote its question; otherwise empty string>"
+}}"""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=512,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return json.loads(response.content[0].text.strip())
+        except Exception as e:
+            logger.warning(f"Feedback suggestion failed: {e}")
+            if suggestion_type == "instruction":
+                return {
+                    "field": "dos_donts",
+                    "field_label": "Dos & Don'ts",
+                    "addition": admin_notes,
+                    "is_duplicate": False,
+                    "duplicate_hint": "",
+                }
+            return {
+                "question": question,
+                "answer": admin_notes,
+                "category": None,
+                "is_duplicate": False,
+                "duplicate_hint": "",
             }
 
     @staticmethod

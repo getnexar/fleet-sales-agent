@@ -1,7 +1,19 @@
 import ReactMarkdown from 'react-markdown'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import type { Message } from '../types'
 
 const ALLOWED_MARKDOWN_ELEMENTS = ['p', 'ul', 'ol', 'li', 'strong', 'em', 'a', 'br']
+
+// Strict sanitization schema: only allow the elements and attributes we explicitly render.
+// This is defense-in-depth alongside react-markdown's skipHtml + allowedElements props.
+const REHYPE_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: ALLOWED_MARKDOWN_ELEMENTS,
+  attributes: {
+    a: ['href', 'target', 'rel'],
+  },
+  protocols: { href: ['https'] },
+}
 
 function safeLink(href?: string) {
   if (!href) return '#'
@@ -32,6 +44,7 @@ export default function MessageBubble({ message }: Props) {
             <ReactMarkdown
               skipHtml
               allowedElements={ALLOWED_MARKDOWN_ELEMENTS}
+              rehypePlugins={[[rehypeSanitize, REHYPE_SANITIZE_SCHEMA]]}
               components={{
                 p: ({ children }) => <p style={{ margin: '0 0 8px 0' }}>{children}</p>,
                 ul: ({ children }) => <ul style={{ margin: '4px 0', paddingLeft: 20 }}>{children}</ul>,
