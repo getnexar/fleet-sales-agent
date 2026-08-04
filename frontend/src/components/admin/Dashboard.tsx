@@ -4,11 +4,12 @@ import type { AdminStats } from '../../types'
 
 // ─── Stat Card ────────────────────────────────────────────────────────────────
 
-function StatCard({ label, value, sub, accent }: { label: string; value: number | string; sub?: string; accent?: boolean }) {
+function StatCard({ label, value, sub, tone }: { label: string; value: number | string; sub?: string; tone?: 'primary' | 'danger' }) {
+  const accentColor = tone === 'danger' ? '#991b1b' : tone === 'primary' ? 'var(--primary)' : undefined
   return (
     <div style={{
       background: 'var(--card)',
-      border: `1px solid ${accent ? 'var(--primary)' : 'var(--border)'}`,
+      border: `1px solid ${tone === 'danger' ? '#fca5a5' : tone === 'primary' ? 'var(--primary)' : 'var(--border)'}`,
       borderRadius: 12,
       padding: '20px 24px',
       flex: 1,
@@ -17,7 +18,7 @@ function StatCard({ label, value, sub, accent }: { label: string; value: number 
       <div style={{ fontSize: 11, color: 'var(--muted-foreground)', fontWeight: 600, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
         {label}
       </div>
-      <div style={{ fontSize: 36, fontWeight: 700, fontFamily: 'var(--font-heading)', color: accent ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
+      <div style={{ fontSize: 36, fontWeight: 700, fontFamily: 'var(--font-heading)', color: accentColor ?? 'var(--foreground)', lineHeight: 1 }}>
         {value}
       </div>
       {sub && <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginTop: 6 }}>{sub}</div>}
@@ -122,15 +123,91 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
+// ─── Failed Submissions ───────────────────────────────────────────────────────
+
+const FAILURE_BUCKETS: { key: 'hubspot' | 'nap_app' | 'missing_details'; label: string; hint: string }[] = [
+  { key: 'hubspot', label: 'HubSpot rejected or unavailable', hint: 'HubSpot API returned an error or rate-limited the request — check form/field config' },
+  { key: 'nap_app', label: 'NAP app error', hint: 'This app failed to complete the submission — check app logs' },
+  { key: 'missing_details', label: 'Missing required details', hint: 'Conversation reached closing without enough contact info to submit' },
+]
+
+function FailureBarChart({
+  failures,
+  loading,
+  onSelectBucket,
+}: {
+  failures?: AdminStats['hubspot_failures']
+  loading: boolean
+  onSelectBucket: (bucket: string) => void
+}) {
+  if (loading) {
+    return <div style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</div>
+  }
+
+  const rows = FAILURE_BUCKETS
+    .map(b => ({ ...b, count: failures ? failures[b.key] : 0 }))
+    .filter(r => r.count > 0)
+    .sort((a, b) => b.count - a.count)
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '4px 0' }}>
+        No failed submissions — everything that reached the close is in HubSpot.
+      </div>
+    )
+  }
+
+  const max = Math.max(...rows.map(r => r.count), 1)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {rows.map(r => (
+        <button
+          key={r.key}
+          onClick={() => onSelectBucket(r.key)}
+          title={r.hint}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            width: '100%', textAlign: 'left', padding: 0,
+            border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          <div style={{ width: 168, fontSize: 12, color: 'var(--foreground)', flexShrink: 0, fontWeight: 500 }}>
+            {r.label}
+          </div>
+          <div style={{ flex: 1, background: 'var(--muted)', borderRadius: 4, height: 18, position: 'relative', overflow: 'hidden' }}>
+            <div style={{
+              width: `${(r.count / max) * 100}%`,
+              background: '#ef4444',
+              borderRadius: 4,
+              height: '100%',
+              minWidth: 4,
+              opacity: 0.85,
+              transition: 'width 0.4s ease',
+            }} />
+          </div>
+          <div style={{ width: 24, fontSize: 12, color: '#991b1b', fontWeight: 700, textAlign: 'right', flexShrink: 0 }}>
+            {r.count}
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
-export default function Dashboard() {
+export default function Dashboard({ onSelectFailureBucket }: { onSelectFailureBucket?: (bucket: string) => void }) {
   const { stats, loading, error, load } = useAdminStats()
 
   useEffect(() => { load() }, [load])
 
   const hsRate = stats && stats.leads_with_contact > 0
     ? Math.round((stats.hubspot_submitted / stats.leads_with_contact) * 100)
+    : 0
+
+  const totalFailed = stats
+    ? stats.hubspot_failures.hubspot + stats.hubspot_failures.nap_app + stats.hubspot_failures.missing_details
     : 0
 
   return (
@@ -153,9 +230,24 @@ export default function Dashboard() {
           label="HubSpot Submissions"
           value={loading ? '…' : (stats?.hubspot_submitted ?? 0)}
           sub={loading ? '' : `${hsRate}% of contacts collected`}
-          accent
+          tone="primary"
+        />
+        <StatCard
+          label="Failed Submissions"
+          value={loading ? '…' : totalFailed}
+          sub="Never made it to HubSpot"
+          tone="danger"
         />
       </div>
+
+      {/* Failed submissions breakdown */}
+      <ChartCard title="Failed Submissions by Reason">
+        <FailureBarChart
+          failures={stats?.hubspot_failures}
+          loading={loading}
+          onSelectBucket={(bucket) => onSelectFailureBucket?.(bucket)}
+        />
+      </ChartCard>
 
       {/* Monthly trend */}
       <ChartCard title="Contacts Collected — Last 6 Months">

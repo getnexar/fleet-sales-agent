@@ -28,6 +28,8 @@ export interface FeedbackRequest {
 
 // ─── Admin types ──────────────────────────────────────────────────────────────
 
+export type HubspotFailureBucket = 'hubspot' | 'nap_app' | 'missing_details'
+
 export interface ConversationSummary {
   session_id: string
   created_at: unknown
@@ -40,6 +42,9 @@ export interface ConversationSummary {
   rating?: 'thumbs_up' | 'thumbs_down'
   rating_notes?: string
   rated_by?: string
+  hubspot_submitted?: boolean
+  hubspot_failure_category?: string | null
+  hubspot_failure_detail?: string | null
 }
 
 export interface ConversationMessage {
@@ -131,6 +136,7 @@ export interface AdminStats {
   total_conversations: number
   leads_with_contact: number
   hubspot_submitted: number
+  hubspot_failures: { hubspot: number; nap_app: number; missing_details: number }
   fleet_size_distribution: { range: string; count: number }[]
   camera_interest: { model: string; count: number }[]
   plan_interest: { plan: string; count: number }[]

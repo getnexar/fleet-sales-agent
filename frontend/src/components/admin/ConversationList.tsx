@@ -3,6 +3,33 @@ import type { ConversationSummary, ConversationDetail, ConversationMessage } fro
 import { useConversations, useConversationDetail } from '../../hooks/useAdmin'
 import FeedbackSuggestionModal from './FeedbackSuggestionModal'
 
+const HUBSPOT_FAILURE_LABELS: Record<string, string> = {
+  hubspot: 'HubSpot',
+  nap_app: 'NAP App',
+  missing_details: 'Missing Details',
+  any: 'Any',
+}
+
+function FailureIcon({ category, detail }: { category?: string | null; detail?: string | null }) {
+  if (!category) return null
+  const bucketLabel = category === 'missing_details' ? 'Missing Details'
+    : category === 'app_error' ? 'NAP App'
+    : 'HubSpot'
+  return (
+    <span
+      title={`Submission failed (${bucketLabel})${detail ? `: ${detail}` : ''}`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 18, height: 18, borderRadius: '50%',
+        background: '#fee2e2', color: '#991b1b',
+        fontSize: 12, fontWeight: 700, flexShrink: 0, cursor: 'help',
+      }}
+    >
+      !
+    </span>
+  )
+}
+
 function formatTs(ts: unknown): string {
   if (!ts) return '—'
   // Firestore timestamps come as {_seconds, _nanoseconds} or ISO strings
@@ -313,14 +340,46 @@ function ConversationDetailPanel({
   )
 }
 
-export default function ConversationList({ onNavigateConfig }: { onNavigateConfig?: (resource: string, detail: string) => void }) {
+export default function ConversationList({
+  onNavigateConfig,
+  initialHubspotFailure,
+}: {
+  onNavigateConfig?: (resource: string, detail: string) => void
+  initialHubspotFailure?: string | null
+}) {
   const { conversations, loading, error, load } = useConversations()
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
+  const [activeFilter, setActiveFilter] = useState<string | null>(initialHubspotFailure ?? null)
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    setActiveFilter(initialHubspotFailure ?? null)
+  }, [initialHubspotFailure])
+
+  useEffect(() => { load(50, activeFilter ?? undefined) }, [load, activeFilter])
 
   return (
     <div style={{ position: 'relative' }}>
+      {activeFilter && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: '#fef3c7', color: '#92400e', borderRadius: 8,
+          padding: '8px 14px', marginBottom: 12, fontSize: 13,
+        }}>
+          <span>
+            Showing only failed submissions — <strong>{HUBSPOT_FAILURE_LABELS[activeFilter] || activeFilter}</strong>
+          </span>
+          <button
+            onClick={() => setActiveFilter(null)}
+            style={{
+              background: 'none', border: '1px solid #92400e', borderRadius: 6,
+              padding: '2px 10px', fontSize: 12, cursor: 'pointer', color: '#92400e',
+            }}
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
           {conversations.length} conversations
@@ -339,7 +398,7 @@ export default function ConversationList({ onNavigateConfig }: { onNavigateConfi
             Export JSON
           </a>
           <button
-            onClick={() => load()}
+            onClick={() => load(50, activeFilter ?? undefined)}
             style={{ fontSize: 13, padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--background)', cursor: 'pointer', color: 'var(--foreground)' }}
           >
             Refresh
@@ -367,7 +426,10 @@ export default function ConversationList({ onNavigateConfig }: { onNavigateConfi
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4, color: 'var(--foreground)' }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4, color: 'var(--foreground)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {!c.hubspot_submitted && (
+                      <FailureIcon category={c.hubspot_failure_category} detail={c.hubspot_failure_detail} />
+                    )}
                     {formatTs(c.updated_at)}
                     <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--muted-foreground)', fontFamily: 'monospace' }}>
                       {c.session_id.slice(0, 12)}…
@@ -387,7 +449,9 @@ export default function ConversationList({ onNavigateConfig }: { onNavigateConfi
             </div>
           ))}
           {conversations.length === 0 && !loading && (
-            <div style={{ color: 'var(--muted-foreground)', padding: '20px 0', textAlign: 'center' }}>No conversations yet.</div>
+            <div style={{ color: 'var(--muted-foreground)', padding: '20px 0', textAlign: 'center' }}>
+              {activeFilter ? 'No failed submissions found for this filter.' : 'No conversations yet.'}
+            </div>
           )}
         </div>
       )}

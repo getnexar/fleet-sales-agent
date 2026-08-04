@@ -14,11 +14,17 @@ interface ConfigTarget {
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [configTarget, setConfigTarget] = useState<ConfigTarget | null>(null)
+  const [conversationsFailureFilter, setConversationsFailureFilter] = useState<string | null>(null)
 
   function navigateToConfig(resource: string, detail: string) {
     const tab = resource === 'faq' ? 'faqs' : 'prompts'
     setConfigTarget({ resource, detail, tab })
     setActiveTab('config')
+  }
+
+  function navigateToFailedConversations(bucket: string) {
+    setConversationsFailureFilter(bucket)
+    setActiveTab('conversations')
   }
 
   return (
@@ -55,6 +61,7 @@ export default function AdminPage() {
             onClick={() => {
               setActiveTab(tab.key)
               if (tab.key !== 'config') setConfigTarget(null)
+              if (tab.key !== 'conversations') setConversationsFailureFilter(null)
             }}
             style={{
               background: 'none',
@@ -85,10 +92,10 @@ export default function AdminPage() {
 
       {/* Content */}
       <div style={{ maxWidth: 1100, margin: '0 auto', padding: '28px 24px' }}>
-        {activeTab === 'dashboard' && <Dashboard />}
+        {activeTab === 'dashboard' && <Dashboard onSelectFailureBucket={navigateToFailedConversations} />}
 
         {activeTab === 'conversations' && (
-          <ConversationList onNavigateConfig={navigateToConfig} />
+          <ConversationList onNavigateConfig={navigateToConfig} initialHubspotFailure={conversationsFailureFilter} />
         )}
 
         {activeTab === 'config' && (

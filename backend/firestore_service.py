@@ -14,6 +14,16 @@ from firebase_admin import credentials, firestore
 
 logger = logging.getLogger(__name__)
 
+# Mirrors HUBSPOT_FAILURE_BUCKETS in main.py — kept in sync manually since importing
+# main here would create a circular import. Maps a fine-grained failure category to
+# the coarse bucket shown in the admin dashboard.
+HUBSPOT_FAILURE_BUCKETS = {
+    "hubspot_rejected": "hubspot",
+    "hubspot_unavailable": "hubspot",
+    "app_error": "nap_app",
+    "missing_details": "missing_details",
+}
+
 
 class FirestoreService:
     """Manages all Firestore interactions for the Fleet Sales Agent."""
@@ -199,7 +209,7 @@ class FirestoreService:
                 .limit(limit)
                 .stream()
             )
-            return self._build_conversation_summaries(docs)
+            results = self._build_conversation_summaries(docs)
         except Exception as e:
             logger.warning(f"Ordered conversation query failed ({e}), trying unordered fallback")
             try:
@@ -211,10 +221,67 @@ class FirestoreService:
                 results = self._build_conversation_summaries(docs)
                 # Sort in Python since we couldn't sort in Firestore
                 results.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
-                return results
             except Exception as e2:
                 logger.error(f"Failed to list conversations: {e2}")
                 raise RuntimeError(f"Firestore query failed: {e2}") from e2
+
+        self._attach_hubspot_status(results)
+        return results
+
+    async def list_conversations_by_hubspot_failure(self, bucket: Optional[str], limit: int = 200) -> List[Dict]:
+        """List conversations whose lead has a HubSpot submission failure, optionally
+        restricted to one dashboard bucket ('hubspot', 'nap_app', 'missing_details')."""
+        try:
+            lead_docs = [d.to_dict() for d in self.db.collection("fleet_leads").limit(5000).stream()]
+        except Exception as e:
+            logger.error(f"Failed to list leads for hubspot-failure filter: {e}")
+            return []
+
+        matching_session_ids = []
+        for lead in lead_docs:
+            if lead.get("hubspot_submitted"):
+                continue
+            category = lead.get("hubspot_failure_category")
+            if not category:
+                continue
+            if bucket and HUBSPOT_FAILURE_BUCKETS.get(category) != bucket:
+                continue
+            sid = lead.get("session_id")
+            if sid:
+                matching_session_ids.append(sid)
+
+        if not matching_session_ids:
+            return []
+
+        matching_session_ids = matching_session_ids[:limit]
+        try:
+            convo_refs = [self.db.collection("fleet_conversations").document(sid) for sid in matching_session_ids]
+            convo_docs = self.db.get_all(convo_refs)
+            results = self._build_conversation_summaries(d for d in convo_docs if d.exists)
+        except Exception as e:
+            logger.error(f"Failed to batch-fetch conversations for hubspot-failure filter: {e}")
+            return []
+
+        self._attach_hubspot_status(results)
+        results.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+        return results
+
+    def _attach_hubspot_status(self, summaries: List[Dict]) -> None:
+        """Batch-fetch fleet_leads for the given conversation summaries and attach
+        hubspot_submitted / hubspot_failure_category / hubspot_failure_detail in place."""
+        if not summaries:
+            return
+        try:
+            lead_refs = [self.db.collection("fleet_leads").document(s["session_id"]) for s in summaries]
+            lead_docs = {d.id: d.to_dict() for d in self.db.get_all(lead_refs) if d.exists}
+        except Exception as e:
+            logger.warning(f"Failed to batch-fetch lead status for conversation list: {e}")
+            return
+        for s in summaries:
+            lead = lead_docs.get(s["session_id"]) or {}
+            s["hubspot_submitted"] = bool(lead.get("hubspot_submitted"))
+            s["hubspot_failure_category"] = lead.get("hubspot_failure_category")
+            s["hubspot_failure_detail"] = lead.get("hubspot_failure_detail")
 
     def _build_conversation_summaries(self, docs) -> List[Dict]:
         results = []
@@ -355,6 +422,17 @@ class FirestoreService:
                 leads_with_contact = sum(1 for d in lead_docs if any(d.get(f) for f in contact_fields))
                 hs_submitted = sum(1 for d in lead_docs if d.get("hubspot_submitted"))
 
+                # Failed-submission breakdown by dashboard bucket (hubspot / nap_app / missing_details).
+                # A lead only counts once it has a failure category and was never successfully submitted.
+                hs_failure_counts = {"hubspot": 0, "nap_app": 0, "missing_details": 0}
+                for d in lead_docs:
+                    if d.get("hubspot_submitted"):
+                        continue
+                    category = d.get("hubspot_failure_category")
+                    bucket = HUBSPOT_FAILURE_BUCKETS.get(category)
+                    if bucket:
+                        hs_failure_counts[bucket] += 1
+
                 # Fleet size distribution
                 size_bins: Dict[str, int] = {"1–10": 0, "11–25": 0, "26–50": 0, "51–100": 0, "100+": 0}
                 for d in lead_docs:
@@ -430,6 +508,7 @@ class FirestoreService:
                     "total_conversations": total_convos,
                     "leads_with_contact": leads_with_contact,
                     "hubspot_submitted": hs_submitted,
+                    "hubspot_failures": hs_failure_counts,
                     "fleet_size_distribution": fleet_size_dist,
                     "camera_interest": camera_interest,
                     "plan_interest": plan_interest,
@@ -441,6 +520,7 @@ class FirestoreService:
             logger.error(f"Failed to count stats: {e}")
             return {
                 "total_conversations": 0, "leads_with_contact": 0, "hubspot_submitted": 0,
+                "hubspot_failures": {"hubspot": 0, "nap_app": 0, "missing_details": 0},
                 "fleet_size_distribution": [], "camera_interest": [], "plan_interest": [], "monthly_leads": [],
             }
 

@@ -16,11 +16,12 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 import httpx as _httpx
 
@@ -117,10 +118,35 @@ if not os.environ.get("EXPORT_ALLOWED_EMAILS", "").strip():
     logger.warning("EXPORT_ALLOWED_EMAILS is not set — conversation export is open to all @getnexar.com accounts")
 
 # Initialize app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup: sync local FAQs to GCS if local has more entries than GCS.
+    # This runs once per instance and is idempotent — it only uploads when the
+    # bundled config file is ahead of what's stored in GCS (e.g. after a deploy
+    # that added new FAQs but couldn't push them via the admin panel).
+    try:
+        import json as _json
+        from backend.storage_service import LOCAL_CONFIG_DIR as _LCD
+        _local_path = os.path.join(_LCD, "faqs_core_28_final.json")
+        with open(_local_path) as _f:
+            _local_faqs = _json.load(_f)
+        _gcs_faqs = storage.get_faqs()
+        if len(_local_faqs) > len(_gcs_faqs):
+            storage.save_faqs(_local_faqs)
+            logger.info(
+                f"Startup FAQ sync: uploaded {len(_local_faqs)} local FAQs to GCS "
+                f"(was {len(_gcs_faqs)})"
+            )
+    except Exception as _e:
+        logger.warning(f"Startup FAQ sync skipped: {_e}")
+    yield
+
+
 app = FastAPI(
     title="Fleet Sales AI Agent",
     description="AI-powered sales assistant for Nexar Fleet",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 _ALLOWED_ORIGINS = ["https://fleet-sales-agent.corp.nexars.ai", "https://fleet.getnexar.com"]
@@ -173,8 +199,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 # Lead completeness threshold - notify Slack when we have these contact fields
 LEAD_NOTIFY_FIELDS = {"contact_name", "contact_email", "contact_phone", "business_name"}
 
-# Fields required before submitting to HubSpot (fleet_size is required by the form)
+# Minimum fields required to submit to HubSpot — email + phone are the identifiers.
+# business_name and contact_name are sent when available but not required to gate submission.
 HUBSPOT_REQUIRED_FIELDS = {"contact_name", "contact_email", "contact_phone", "business_name", "fleet_size"}
+HUBSPOT_MIN_FIELDS = {"contact_email", "contact_phone"}
 
 # HubSpot form details — set via environment variables
 # Form: inbound_smb_fleets
@@ -256,7 +284,7 @@ _LLM_RESULT_ALLOWED_KEYS = {"answer", "follow_up", "cta_type", "lead_signals", "
 _LLM_LEAD_ALLOWED_KEYS = {
     "fleet_size", "industry", "pain_points", "contact_name", "contact_email",
     "contact_phone", "order_intent", "business_name", "num_cameras",
-    "camera_model", "memory_option", "subscription_plan",
+    "camera_model", "memory_option", "subscription_plan", "segment",
 }
 
 
@@ -491,11 +519,27 @@ def _hubspot_retry_due(lead: dict) -> bool:
         return True
 
 
-def _hubspot_failure_update(lead: dict, *, permanent: bool = False) -> dict:
+
+# Coarse buckets surfaced in the admin dashboard: which side of the integration
+# a failed submission points to, so an admin can tell at a glance whether to
+# check HubSpot's form config, this app's code/infra, or the lead's own data.
+HUBSPOT_FAILURE_BUCKETS = {
+    "hubspot_rejected": "hubspot",
+    "hubspot_unavailable": "hubspot",
+    "app_error": "nap_app",
+    "missing_details": "missing_details",
+}
+
+
+def _hubspot_failure_update(
+    lead: dict, *, permanent: bool = False, category: str = "hubspot_unavailable", detail: str = ""
+) -> dict:
     retry_count = int((lead or {}).get("hubspot_retry_count") or 0) + 1
     update = {
         "hubspot_retry_count": retry_count,
         "hubspot_last_failure_at": datetime.now(timezone.utc).isoformat(),
+        "hubspot_failure_category": category,
+        "hubspot_failure_detail": detail[:300],
     }
     if permanent or retry_count >= HUBSPOT_RETRY_LIMIT:
         update["hubspot_permanently_failed"] = True
@@ -532,14 +576,24 @@ def _build_chatbot_summary(lead: dict, messages: list) -> str:
     lead = _sanitize_lead_for_downstream(lead)
     lines = ["=== LEAD SUMMARY ==="]
 
+    if lead.get("contact_name_inferred"):
+        lines.append(
+            "⚠️ Name: inferred from email address — not confirmed by the customer. Please validate during follow-up."
+        )
+    elif lead.get("contact_name_defaulted"):
+        lines.append(
+            "⚠️ Name: could not be determined — placeholder used to submit lead. Please validate during follow-up."
+        )
     if lead.get("fleet_size"):
         fleet_line = f"Fleet size: {lead['fleet_size']} vehicles"
         if lead.get("fleet_size_defaulted"):
             fleet_line += (
-                " — NOTE: fleet size was NOT provided by the customer. "
+                " — ⚠️ NOT provided by the customer. "
                 "Defaulted to 10 by the chatbot to push the lead through. Please validate during follow-up."
             )
         lines.append(fleet_line)
+    if lead.get("segment"):
+        lines.append(f"Segment: {lead['segment'].capitalize()}")
     if lead.get("industry"):
         lines.append(f"Industry: {lead['industry']}")
     if lead.get("pain_points"):
@@ -743,6 +797,7 @@ async def chat(request: ChatRequest, http_request: Request):
                     "camera_model":      lead_signals.get("camera_model"),
                     "memory_option":     lead_signals.get("memory_option"),
                     "subscription_plan": lead_signals.get("subscription_plan"),
+                    "segment":           lead_signals.get("segment"),
                     "cta_type":          cta_type,
                 }.items() if v is not None
             }
@@ -796,9 +851,9 @@ async def chat(request: ChatRequest, http_request: Request):
             _fleet_size_satisfied = current_lead.get("fleet_size") or current_lead.get("num_cameras")
             _non_fleet_required = HUBSPOT_REQUIRED_FIELDS - {"fleet_size"}
 
-            # If contact info is complete but fleet size is missing, default to 10 so the
+            # If minimum contact info is present but fleet size is missing, default to 10 so the
             # lead is never lost. Note it in Firestore so the summary flags it for the sales rep.
-            if not _fleet_size_satisfied and wants_sales_followup and all(current_lead.get(f) for f in _non_fleet_required):
+            if not _fleet_size_satisfied and wants_sales_followup and all(current_lead.get(f) for f in HUBSPOT_MIN_FIELDS):
                 _FLEET_ASK_RE_MAIN = re.compile(
                     r'\b(how many.{0,40}(vehicles|cars|trucks|fleet|cameras|units)|fleet size)\b',
                     re.IGNORECASE
@@ -816,11 +871,21 @@ async def chat(request: ChatRequest, http_request: Request):
                 )
             # Log what's missing so we can debug gate failures
             if wants_sales_followup and not current_lead.get("hubspot_submitted"):
-                missing = [f for f in _non_fleet_required if not current_lead.get(f)]
+                missing = [f for f in HUBSPOT_MIN_FIELDS if not current_lead.get(f)]
                 if not _fleet_size_satisfied:
                     missing.append("fleet_size (or num_cameras)")
                 if missing:
                     logger.info(f"HubSpot gate: missing fields {missing} for session {_sid(request.session_id)}")
+                    # Only flag as a stalled lead once the conversation has actually reached
+                    # the closing phase — earlier turns may still fill these fields in.
+                    if phase_str == "CLOSE_QUOTE" and not current_lead.get("hubspot_permanently_failed"):
+                        await firestore_service.upsert_lead(
+                            request.session_id,
+                            {
+                                "hubspot_failure_category": "missing_details",
+                                "hubspot_failure_detail": f"Missing required field(s): {', '.join(missing)}",
+                            },
+                        )
                 else:
                     logger.info(
                         f"HubSpot gate: all required fields present, "
@@ -830,14 +895,14 @@ async def chat(request: ChatRequest, http_request: Request):
                         f"for session {_sid(request.session_id)}"
                     )
 
-            # HubSpot: submit to inbound_smb_fleets form when all required fields present
+            # HubSpot: submit when minimum contact fields present (email + phone)
             if (
                 wants_sales_followup
                 and not current_lead.get("hubspot_submitted")
                 and not current_lead.get("hubspot_permanently_failed")
                 and _hubspot_retry_due(current_lead)
                 and _fleet_size_satisfied
-                and all(current_lead.get(f) for f in _non_fleet_required)
+                and all(current_lead.get(f) for f in HUBSPOT_MIN_FIELDS)
                 and HUBSPOT_PORTAL_ID
                 and HUBSPOT_FORM_ID
             ):
@@ -846,7 +911,7 @@ async def chat(request: ChatRequest, http_request: Request):
                     convo = await firestore_service.get_conversation(request.session_id)
                     messages_for_summary = (convo or {}).get("messages", [])
                     safe_lead = _sanitize_lead_for_downstream(current_lead)
-                    if not all(safe_lead.get(f) for f in HUBSPOT_REQUIRED_FIELDS):
+                    if not all(safe_lead.get(f) for f in HUBSPOT_MIN_FIELDS):
                         logger.warning(
                             f"HubSpot skipped after downstream sanitization removed required field "
                             f"for session {_sid(request.session_id)}"
@@ -859,13 +924,32 @@ async def chat(request: ChatRequest, http_request: Request):
                             cta_type=cta_type,
                             quote_url=quote_url,
                         )
+                    _name_defaulted_pre = not current_lead.get("contact_name")
+                    if _name_defaulted_pre:
+                        safe_lead = dict(safe_lead, contact_name_defaulted=True)
                     chatbot_summary = _build_chatbot_summary(safe_lead, messages_for_summary)
 
                     # Split full name into first / last; enforce field length limits
                     # before transmission to prevent oversized data reaching HubSpot.
-                    name_parts = (safe_lead.get("contact_name") or "").split()
-                    firstname = (name_parts[0] if name_parts else "")[:100]
-                    lastname = (" ".join(name_parts[1:]) if len(name_parts) > 1 else "")[:100]
+                    # If name is missing, attempt to infer it from the email prefix
+                    # (e.g. john.doe@co.com → "John", "Doe") — flagged in summary for sales.
+                    _GENERIC_EMAIL_PREFIXES = {
+                        "info", "contact", "sales", "hello", "admin", "support",
+                        "help", "noreply", "no-reply", "office", "team", "mail",
+                        "enquiries", "enquiry", "billing", "hr", "ops", "marketing",
+                    }
+                    if safe_lead.get("contact_name"):
+                        name_parts = safe_lead["contact_name"].split()
+                    else:
+                        _email_prefix = (safe_lead.get("contact_email") or "").split("@")[0]
+                        _inferred = [p.title() for p in re.split(r'[._\-]', _email_prefix) if p]
+                        if _inferred and _inferred[0].lower() not in _GENERIC_EMAIL_PREFIXES:
+                            name_parts = _inferred
+                            safe_lead = dict(safe_lead, contact_name_inferred=True)
+                        else:
+                            name_parts = ["Lead"]
+                    firstname = (name_parts[0] if name_parts else "Lead")[:100]
+                    lastname = (" ".join(name_parts[1:]) if len(name_parts) > 1 else firstname)[:100]
                     hs_email = (safe_lead.get("contact_email") or "")[:254]
                     hs_phone = (safe_lead.get("contact_phone") or "")[:20]
                     hs_company = (safe_lead.get("business_name") or "")[:200]
@@ -925,7 +1009,12 @@ async def chat(request: ChatRequest, http_request: Request):
                             # Mark as permanently failed in Firestore so we don't retry on every message.
                             # Body not logged to avoid potential PII echo; check portal/form ID config.
                             await firestore_service.upsert_lead(
-                                request.session_id, {"hubspot_permanently_failed": True}
+                                request.session_id,
+                                {
+                                    "hubspot_permanently_failed": True,
+                                    "hubspot_failure_category": "hubspot_rejected",
+                                    "hubspot_failure_detail": f"HubSpot rejected submission (HTTP {_hr.status_code}) — check form field mapping",
+                                },
                             )
                             logger.error(
                                 f"HubSpot permanent error {_hr.status_code} for session {_sid(request.session_id)}: "
@@ -933,7 +1022,11 @@ async def chat(request: ChatRequest, http_request: Request):
                             )
                         elif _hr.status_code == 429:
                             # Rate limit — clearly transient, retry with cooldown.
-                            _update = _hubspot_failure_update(current_lead)
+                            _update = _hubspot_failure_update(
+                                current_lead,
+                                category="hubspot_unavailable",
+                                detail="HubSpot rate-limited the submission (HTTP 429)",
+                            )
                             if _update.get("hubspot_permanently_failed"):
                                 logger.error(
                                     f"HubSpot giving up after {_update['hubspot_retry_count']} rate-limit failures "
@@ -951,7 +1044,11 @@ async def chat(request: ChatRequest, http_request: Request):
                             # a misconfigured payload (wrong field names, malformed data). Retry
                             # up to HUBSPOT_RETRY_LIMIT; giving up permanently avoids an infinite
                             # retry loop against a config issue that will never self-resolve.
-                            _update = _hubspot_failure_update(current_lead)
+                            _update = _hubspot_failure_update(
+                                current_lead,
+                                category="hubspot_unavailable",
+                                detail=f"HubSpot server error (HTTP {_hr.status_code})",
+                            )
                             if _update.get("hubspot_permanently_failed"):
                                 logger.error(
                                     f"HubSpot giving up after {_update['hubspot_retry_count']} server errors "
@@ -968,7 +1065,12 @@ async def chat(request: ChatRequest, http_request: Request):
                             await firestore_service.upsert_lead(request.session_id, _update)
                         else:
                             await firestore_service.upsert_lead(
-                                request.session_id, {"hubspot_permanently_failed": True}
+                                request.session_id,
+                                {
+                                    "hubspot_permanently_failed": True,
+                                    "hubspot_failure_category": "app_error",
+                                    "hubspot_failure_detail": f"Unexpected HubSpot response (HTTP {_hr.status_code})",
+                                },
                             )
                             logger.error(
                                 f"HubSpot unexpected permanent error {_hr.status_code} "
@@ -978,7 +1080,15 @@ async def chat(request: ChatRequest, http_request: Request):
                     is_transient = isinstance(
                         hs_err, (_httpx.TimeoutException, _httpx.NetworkError, _httpx.TransportError)
                     )
-                    _update = _hubspot_failure_update(current_lead, permanent=not is_transient)
+                    _update = _hubspot_failure_update(
+                        current_lead,
+                        permanent=not is_transient,
+                        category="hubspot_unavailable" if is_transient else "app_error",
+                        detail=(
+                            f"Network error reaching HubSpot: {type(hs_err).__name__}" if is_transient
+                            else f"Unexpected error submitting to HubSpot: {type(hs_err).__name__}"
+                        ),
+                    )
                     if _update.get("hubspot_permanently_failed"):
                         logger.error(
                             f"HubSpot giving up after {_update['hubspot_retry_count']} "
@@ -1040,8 +1150,9 @@ async def submit_feedback(request: FeedbackRequest):
 
 @app.get("/api/admin/me")
 async def admin_me(user: str = Depends(require_corp)):
-    """Return the authenticated corp user's email."""
-    return {"email": user}
+    """Return the authenticated corp user's email and prompt-admin status."""
+    admins = _prompt_admin_emails()
+    return {"email": user, "is_prompt_admin": bool(admins and user.lower() in admins)}
 
 
 @app.get("/api/admin/stats")
@@ -1075,11 +1186,29 @@ async def get_feedback(limit: int = Query(default=100, ge=1, le=500), user: str 
 
 # ─── Admin: Conversations ─────────────────────────────────────────────────────
 
+_HUBSPOT_FAILURE_FILTER_VALUES = {"any", "hubspot", "nap_app", "missing_details"}
+
+
 @app.get("/api/admin/conversations")
-async def list_conversations(limit: int = Query(default=50, ge=1, le=500), user: str = Depends(require_corp)):
-    """List recent conversation sessions with summary metadata."""
+async def list_conversations(
+    limit: int = Query(default=50, ge=1, le=500),
+    hubspot_failure: Optional[str] = Query(default=None),
+    user: str = Depends(require_corp),
+):
+    """List recent conversation sessions with summary metadata.
+
+    If hubspot_failure is set (one of 'any', 'hubspot', 'nap_app', 'missing_details'),
+    returns only conversations whose lead has a matching HubSpot submission failure,
+    regardless of recency — used by the dashboard's failed-submissions drill-down.
+    """
     try:
-        conversations = await firestore_service.list_conversations(limit=limit)
+        if hubspot_failure:
+            if hubspot_failure not in _HUBSPOT_FAILURE_FILTER_VALUES:
+                raise HTTPException(status_code=400, detail="Invalid hubspot_failure value")
+            bucket = None if hubspot_failure == "any" else hubspot_failure
+            conversations = await firestore_service.list_conversations_by_hubspot_failure(bucket, limit=limit)
+        else:
+            conversations = await firestore_service.list_conversations(limit=limit)
         return {"conversations": conversations, "count": len(conversations)}
     except RuntimeError as e:
         logger.error(f"List conversations error: {e}")
@@ -1270,7 +1399,7 @@ async def suggest_from_feedback(
 # ─── Admin: Config (FAQ + prompts) ───────────────────────────────────────────
 
 @app.get("/api/admin/config/context")
-async def get_agent_context(user: str = Depends(require_prompt_admin)):
+async def get_agent_context(user: str = Depends(require_corp)):
     """Get the sales-team-editable agent context (business context, tone, dos/don'ts)."""
     return storage.get_agent_context()
 
@@ -1308,7 +1437,7 @@ async def update_agent_context(request: AgentContextUpdate, user: str = Depends(
 
 
 @app.get("/api/admin/config")
-async def get_config(user: str = Depends(require_prompt_admin)):
+async def get_config(user: str = Depends(require_corp)):
     """Get all editable bot config: FAQs, core prompt, and phase prompts."""
     from backend.chat_service import CORE_PROMPT_TEMPLATE
     from backend.conversation_router import PHASE_PROMPTS, ConversationPhase
@@ -1340,6 +1469,60 @@ class ConfigPromptsUpdate(BaseModel):
     # The caller must state why they're changing the prompts and confirm their identity.
     change_reason: str = ""
     confirmed_by: str = ""  # Must match the authenticated user's email
+
+
+class AgentContextAppend(BaseModel):
+    field: Literal["business_context", "escalations", "tone_style", "dos_donts"]
+    content: str = Field(max_length=2000)
+
+
+@app.post("/api/admin/config/context/append")
+async def append_agent_context(request: AgentContextAppend, user: str = Depends(require_corp)):
+    """Append content to an existing context field — corp users only, no delete or overwrite."""
+    _validate_prompt_content(request.content, request.field)
+    try:
+        current = storage.get_agent_context() or {}
+        existing = (current.get(request.field) or "").strip()
+        separator = "\n\n---\n\n" if existing else ""
+        updated = {
+            "business_context": current.get("business_context", ""),
+            "escalations": current.get("escalations", ""),
+            "tone_style": current.get("tone_style", ""),
+            "dos_donts": current.get("dos_donts", ""),
+        }
+        updated[request.field] = existing + separator + request.content.strip()
+        logger.warning(f"CONFIG_CHANGE: {user} appended to agent context field {request.field}")
+        storage.save_agent_context(updated)
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Agent context append error: {e}")
+        raise HTTPException(status_code=503, detail="Failed to save — storage error")
+
+
+@app.post("/api/admin/config/faqs/add")
+async def add_faq(request: FaqEntry, user: str = Depends(require_corp)):
+    """Append a single FAQ entry — corp users only, no delete or overwrite."""
+    if not request.question.strip() or not request.answer.strip():
+        raise HTTPException(status_code=400, detail="Question and answer are required")
+    _validate_prompt_content(request.question, "question")
+    _validate_prompt_content(request.answer, "answer")
+    if request.category:
+        _validate_prompt_content(request.category, "category")
+    try:
+        existing = storage.get_faqs() or []
+        if len(existing) >= 500:
+            raise HTTPException(status_code=400, detail="FAQ list at maximum capacity (500)")
+        existing.append(request.model_dump())
+        logger.warning(f"CONFIG_CHANGE: {user} added FAQ: {request.question[:60]}")
+        storage.save_faqs(existing)
+        return {"status": "ok", "count": len(existing)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"FAQ add error: {e}")
+        raise HTTPException(status_code=503, detail="Failed to save — storage error")
 
 
 @app.put("/api/admin/config/faqs")

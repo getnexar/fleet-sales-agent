@@ -8,31 +8,34 @@ import type {
   AgentContext,
   AdminStats,
   LeadRecord,
+  FaqEntry,
 } from '../types'
 
 // ─── Current User ─────────────────────────────────────────────────────────────
 
 export function useCurrentUser() {
   const [email, setEmail] = useState<string | null>(null)
+  const [isPromptAdmin, setIsPromptAdmin] = useState(false)
   const [loading, setLoading] = useState(false)
 
   const load = useCallback(async () => {
-    if (email) return email
+    if (email) return { email, isPromptAdmin }
     setLoading(true)
     try {
       const res = await fetch('/api/admin/me')
       if (!res.ok) return null
       const data = await res.json()
       setEmail(data.email)
-      return data.email as string
+      setIsPromptAdmin(data.is_prompt_admin ?? false)
+      return { email: data.email as string, isPromptAdmin: data.is_prompt_admin as boolean }
     } catch {
       return null
     } finally {
       setLoading(false)
     }
-  }, [email])
+  }, [email, isPromptAdmin])
 
-  return { email, loading, load }
+  return { email, isPromptAdmin, loading, load }
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
@@ -91,11 +94,14 @@ export function useConversations() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async (limit = 50) => {
+  const load = useCallback(async (limit = 50, hubspotFailure?: string) => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/admin/conversations?limit=${limit}`)
+      const qs = hubspotFailure
+        ? `limit=${limit}&hubspot_failure=${encodeURIComponent(hubspotFailure)}`
+        : `limit=${limit}`
+      const res = await fetch(`/api/admin/conversations?${qs}`)
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       const data = await res.json()
       setConversations(data.conversations)
@@ -217,7 +223,31 @@ export function useAgentContext() {
     }
   }, [])
 
-  return { context, loading, saving, saved, error, load, save }
+  const appendField = useCallback(async (field: string, content: string) => {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/config/context/append', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field, content }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `${res.status} ${res.statusText}`)
+      }
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+      setContext(null)
+      await load()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }, [load])
+
+  return { context, loading, saving, saved, error, load, save, appendField }
 }
 
 // ─── Config (FAQs + Raw Prompts) ──────────────────────────────────────────────
@@ -262,6 +292,30 @@ export function useAdminConfig() {
     }
   }, [])
 
+  const addFaq = useCallback(async (faq: FaqEntry) => {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/config/faqs/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(faq),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `${res.status} ${res.statusText}`)
+      }
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+      setConfig(null)
+      await load()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }, [load])
+
   const savePrompts = useCallback(async (
     corePrompt: string,
     phasePrompts: Record<string, string>,
@@ -294,7 +348,7 @@ export function useAdminConfig() {
     }
   }, [])
 
-  return { config, loading, saving, saved, error, load, saveFaqs, savePrompts }
+  return { config, loading, saving, saved, error, load, saveFaqs, addFaq, savePrompts }
 }
 
 // ─── Feedback → Agent Suggestion ──────────────────────────────────────────────
