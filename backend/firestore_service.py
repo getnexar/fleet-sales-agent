@@ -24,6 +24,10 @@ HUBSPOT_FAILURE_BUCKETS = {
     "missing_details": "missing_details",
 }
 
+# Internal Nexar test submissions — excluded from admin dashboard stats so
+# reported lead/conversation counts reflect real prospects only.
+TEST_LEAD_EMAILS = {"taliya@getnexar.com", "taliyadishon@gamil.com"}
+
 
 class FirestoreService:
     """Manages all Firestore interactions for the Fleet Sales Agent."""
@@ -415,8 +419,18 @@ class FirestoreService:
             loop = asyncio.get_event_loop()
 
             def _query():
-                total_convos = sum(1 for _ in self.db.collection("fleet_conversations").limit(5000).stream())
-                lead_docs = [d.to_dict() for d in self.db.collection("fleet_leads").limit(5000).stream()]
+                lead_snapshots = list(self.db.collection("fleet_leads").limit(5000).stream())
+                excluded_session_ids = {
+                    snap.id for snap in lead_snapshots
+                    if ((snap.to_dict() or {}).get("contact_email") or "").strip().lower() in TEST_LEAD_EMAILS
+                }
+                lead_docs = [
+                    snap.to_dict() for snap in lead_snapshots if snap.id not in excluded_session_ids
+                ]
+                total_convos = sum(
+                    1 for snap in self.db.collection("fleet_conversations").limit(5000).stream()
+                    if snap.id not in excluded_session_ids
+                )
 
                 contact_fields = {"contact_name", "contact_email", "contact_phone", "business_name"}
                 leads_with_contact = sum(1 for d in lead_docs if any(d.get(f) for f in contact_fields))
@@ -513,6 +527,7 @@ class FirestoreService:
                     "camera_interest": camera_interest,
                     "plan_interest": plan_interest,
                     "monthly_leads": monthly_leads,
+                    "excluded_test_sessions": len(excluded_session_ids),
                 }
 
             return await loop.run_in_executor(None, _query)
@@ -522,6 +537,7 @@ class FirestoreService:
                 "total_conversations": 0, "leads_with_contact": 0, "hubspot_submitted": 0,
                 "hubspot_failures": {"hubspot": 0, "nap_app": 0, "missing_details": 0},
                 "fleet_size_distribution": [], "camera_interest": [], "plan_interest": [], "monthly_leads": [],
+                "excluded_test_sessions": 0,
             }
 
     # ─── Distributed Rate Limiting ────────────────────────────────────────────
