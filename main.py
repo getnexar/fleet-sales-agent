@@ -471,11 +471,12 @@ def _sanitize_lead_for_downstream(lead: dict) -> dict:
 def _client_rate_limit_key(request: Request) -> str:
     """Hash client IP into a stable, non-reversible key for public endpoint limits."""
     if os.environ.get("APP_ENV") == "production":
-        # In production, the NAP ingress is the sole entity that appends to X-Forwarded-For.
-        # XFF is not accessible to external actors without going through the ingress,
-        # so the last entry in the chain is the authoritative client IP.
+        # Leftmost XFF entry is the original client, per Nexar platform convention
+        # (see clientIPFromRequest in getnexar/corp-load-balancer auth-broker,
+        # RFC 7239). Using the last entry is spoofable — flagged by security review
+        # depsec-ab27e7038aa19a39.
         forwarded_for = request.headers.get("X-Forwarded-For", "")
-        client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
+        client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else ""
     else:
         # Outside production, do not trust XFF — use the direct socket address so
         # local tests and staging deployments cannot spoof IPs via crafted headers.
@@ -1223,9 +1224,9 @@ async def export_conversations(request: Request, limit: int = Query(default=25, 
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
-    # The trusted platform ingress appends its observed client IP at the end.
+    # Leftmost XFF entry is the original client, per Nexar platform convention.
     forwarded_for = request.headers.get("X-Forwarded-For", "")
-    client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else (request.client.host if request.client else "unknown")
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else "unknown")
     client_ip = _safe_log_value(client_ip, 45)
     logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
