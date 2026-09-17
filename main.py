@@ -61,16 +61,26 @@ def require_prompt_admin(request: Request) -> str:
     return user
 
 
-def require_corp_export(request: Request) -> str:
+def _console_allowed_emails() -> set[str]:
+    return {
+        e.strip().lower()
+        for e in os.environ.get("CONSOLE_ALLOWED_EMAILS", "").split(",")
+        if e.strip()
+    }
+
+
+def require_console_access(request: Request) -> str:
     """
-    Stricter dependency for data-export endpoints.
-    By default any @getnexar.com account is allowed; set EXPORT_ALLOWED_EMAILS (comma-separated)
-    to restrict export access to specific accounts for granular data access control.
+    Dependency for the whole admin console (viewing, export, and other
+    non-content-editing endpoints). Restricted to CONSOLE_ALLOWED_EMAILS
+    (comma-separated) — the same people granted access to this app via NAP.
+    Content-editing endpoints (KB/prompts/FAQs) use the stricter
+    require_prompt_admin instead.
     """
     user = require_corp(request)
-    _allowed = {e.strip() for e in os.environ.get("EXPORT_ALLOWED_EMAILS", "").split(",") if e.strip()}
-    if _allowed and user not in _allowed:
-        raise HTTPException(status_code=403, detail="Export access restricted to authorised accounts")
+    admins = _console_allowed_emails()
+    if user.lower() not in admins:
+        raise HTTPException(status_code=403, detail="Console access restricted to authorised accounts")
     return user
 
 
@@ -114,8 +124,8 @@ logger = logging.getLogger(__name__)
 # Startup assertions — fail fast on missing security-critical config
 if not os.environ.get("PROMPT_ADMIN_EMAILS", "").strip():
     raise RuntimeError("PROMPT_ADMIN_EMAILS must be set — bot configuration endpoints would be inaccessible without it")
-if not os.environ.get("EXPORT_ALLOWED_EMAILS", "").strip():
-    logger.warning("EXPORT_ALLOWED_EMAILS is not set — conversation export is open to all @getnexar.com accounts")
+if not os.environ.get("CONSOLE_ALLOWED_EMAILS", "").strip():
+    raise RuntimeError("CONSOLE_ALLOWED_EMAILS must be set — admin console endpoints would be inaccessible without it")
 
 # Initialize app
 @asynccontextmanager
@@ -471,11 +481,12 @@ def _sanitize_lead_for_downstream(lead: dict) -> dict:
 def _client_rate_limit_key(request: Request) -> str:
     """Hash client IP into a stable, non-reversible key for public endpoint limits."""
     if os.environ.get("APP_ENV") == "production":
-        # In production, the NAP ingress is the sole entity that appends to X-Forwarded-For.
-        # XFF is not accessible to external actors without going through the ingress,
-        # so the last entry in the chain is the authoritative client IP.
+        # Leftmost XFF entry is the original client, per Nexar platform convention
+        # (see clientIPFromRequest in getnexar/corp-load-balancer auth-broker,
+        # RFC 7239). Using the last entry is spoofable — flagged by security review
+        # depsec-ab27e7038aa19a39.
         forwarded_for = request.headers.get("X-Forwarded-For", "")
-        client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
+        client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else ""
     else:
         # Outside production, do not trust XFF — use the direct socket address so
         # local tests and staging deployments cannot spoof IPs via crafted headers.
@@ -1149,21 +1160,21 @@ async def submit_feedback(request: FeedbackRequest):
 
 
 @app.get("/api/admin/me")
-async def admin_me(user: str = Depends(require_corp)):
+async def admin_me(user: str = Depends(require_console_access)):
     """Return the authenticated corp user's email and prompt-admin status."""
     admins = _prompt_admin_emails()
     return {"email": user, "is_prompt_admin": bool(admins and user.lower() in admins)}
 
 
 @app.get("/api/admin/stats")
-async def admin_stats(user: str = Depends(require_corp)):
+async def admin_stats(user: str = Depends(require_console_access)):
     """Return aggregate counts for the dashboard (conversations, leads, HubSpot submissions)."""
     stats = await firestore_service.count_stats()
     return stats
 
 
 @app.post("/api/admin/reload-config")
-async def reload_config(user: str = Depends(require_corp)):
+async def reload_config(user: str = Depends(require_console_access)):
     """Force reload of FAQ/instructions from GCS (no redeployment needed)."""
     logger.warning(f"CONFIG_CHANGE: {user} triggered config cache reload")
     storage.reload()
@@ -1171,14 +1182,14 @@ async def reload_config(user: str = Depends(require_corp)):
 
 
 @app.get("/api/admin/leads")
-async def get_leads(limit: int = Query(default=50, ge=1, le=500), user: str = Depends(require_corp)):
+async def get_leads(limit: int = Query(default=50, ge=1, le=500), user: str = Depends(require_console_access)):
     """Get recent leads for admin monitoring."""
     leads = await firestore_service.get_recent_leads(limit=limit)
     return {"leads": leads, "count": len(leads)}
 
 
 @app.get("/api/admin/feedback")
-async def get_feedback(limit: int = Query(default=100, ge=1, le=500), user: str = Depends(require_corp)):
+async def get_feedback(limit: int = Query(default=100, ge=1, le=500), user: str = Depends(require_console_access)):
     """Get recent feedback for admin monitoring."""
     feedback = await firestore_service.get_recent_feedback(limit=limit)
     return {"feedback": feedback, "count": len(feedback)}
@@ -1193,7 +1204,7 @@ _HUBSPOT_FAILURE_FILTER_VALUES = {"any", "hubspot", "nap_app", "missing_details"
 async def list_conversations(
     limit: int = Query(default=50, ge=1, le=500),
     hubspot_failure: Optional[str] = Query(default=None),
-    user: str = Depends(require_corp),
+    user: str = Depends(require_console_access),
 ):
     """List recent conversation sessions with summary metadata.
 
@@ -1216,16 +1227,16 @@ async def list_conversations(
 
 
 @app.get("/api/admin/conversations/export")
-async def export_conversations(request: Request, limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_corp_export)):
+async def export_conversations(request: Request, limit: int = Query(default=25, ge=1, le=100), user: str = Depends(require_console_access)):
     """Export full conversation sessions (with lead data) as a downloadable JSON file."""
     import json as _json
     from fastapi.responses import Response
 
     sessions = []
     summaries = await firestore_service.list_conversations(limit=limit)
-    # The trusted platform ingress appends its observed client IP at the end.
+    # Leftmost XFF entry is the original client, per Nexar platform convention.
     forwarded_for = request.headers.get("X-Forwarded-For", "")
-    client_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else (request.client.host if request.client else "unknown")
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else "unknown")
     client_ip = _safe_log_value(client_ip, 45)
     logger.warning(f"DATA_EXPORT: {user} from {client_ip} exported up to {limit} conversation records ({len(summaries)} found)")
     for s in summaries:
@@ -1249,7 +1260,7 @@ async def export_conversations(request: Request, limit: int = Query(default=25, 
 
 
 @app.get("/api/admin/conversations/{session_id}")
-async def get_conversation(session_id: str, user: str = Depends(require_corp)):
+async def get_conversation(session_id: str, user: str = Depends(require_console_access)):
     """Get full conversation history and associated lead data."""
     if not _UUID_RE.match(session_id):
         raise HTTPException(status_code=400, detail="Invalid session ID")
@@ -1271,7 +1282,7 @@ class ConversationRatingRequest(BaseModel):
 async def rate_conversation(
     session_id: str,
     request: ConversationRatingRequest,
-    user: str = Depends(require_corp),
+    user: str = Depends(require_console_access),
 ):
     """Rate a conversation and (for thumbs_down) trigger async Gemini triage."""
     if not _UUID_RE.match(session_id):
@@ -1338,7 +1349,7 @@ async def rate_conversation(
 # ─── Admin: Thumbs-down feedback with triage ─────────────────────────────────
 
 @app.get("/api/admin/feedback/thumbs-down")
-async def get_thumbs_down_feedback(limit: int = Query(default=100, ge=1, le=500), user: str = Depends(require_corp)):
+async def get_thumbs_down_feedback(limit: int = Query(default=100, ge=1, le=500), user: str = Depends(require_console_access)):
     """Get all thumbs-down feedback with triage classification."""
     feedback = await firestore_service.get_thumbs_down_feedback(limit=limit)
     return {"feedback": feedback, "count": len(feedback)}
@@ -1399,7 +1410,7 @@ async def suggest_from_feedback(
 # ─── Admin: Config (FAQ + prompts) ───────────────────────────────────────────
 
 @app.get("/api/admin/config/context")
-async def get_agent_context(user: str = Depends(require_corp)):
+async def get_agent_context(user: str = Depends(require_console_access)):
     """Get the sales-team-editable agent context (business context, tone, dos/don'ts)."""
     return storage.get_agent_context()
 
@@ -1437,7 +1448,7 @@ async def update_agent_context(request: AgentContextUpdate, user: str = Depends(
 
 
 @app.get("/api/admin/config")
-async def get_config(user: str = Depends(require_corp)):
+async def get_config(user: str = Depends(require_console_access)):
     """Get all editable bot config: FAQs, core prompt, and phase prompts."""
     from backend.chat_service import CORE_PROMPT_TEMPLATE
     from backend.conversation_router import PHASE_PROMPTS, ConversationPhase
@@ -1477,7 +1488,7 @@ class AgentContextAppend(BaseModel):
 
 
 @app.post("/api/admin/config/context/append")
-async def append_agent_context(request: AgentContextAppend, user: str = Depends(require_corp)):
+async def append_agent_context(request: AgentContextAppend, user: str = Depends(require_prompt_admin)):
     """Append content to an existing context field — corp users only, no delete or overwrite."""
     _validate_prompt_content(request.content, request.field)
     try:
@@ -1502,7 +1513,7 @@ async def append_agent_context(request: AgentContextAppend, user: str = Depends(
 
 
 @app.post("/api/admin/config/faqs/add")
-async def add_faq(request: FaqEntry, user: str = Depends(require_corp)):
+async def add_faq(request: FaqEntry, user: str = Depends(require_prompt_admin)):
     """Append a single FAQ entry — corp users only, no delete or overwrite."""
     if not request.question.strip() or not request.answer.strip():
         raise HTTPException(status_code=400, detail="Question and answer are required")

@@ -55,4 +55,5 @@ env:
   HUBSPOT_RETRY_LIMIT: "3"
   HUBSPOT_RETRY_COOLDOWN_SECONDS: "900"
   IP_RATE_LIMIT_MAX: "120"
-  PROMPT_ADMIN_EMAILS: "taliya@getnexar.com"
+  PROMPT_ADMIN_EMAILS: "taliya@getnexar.com,mark.pawloski@getnexar.com,shaya.horowitz@getnexar.com,dean.becker@getnexar.com,daniel.shihan@getnexar.com"
+  CONSOLE_ALLOWED_EMAILS: "taliya@getnexar.com,mark.pawloski@getnexar.com,evan.obrien@getnexar.com,shaya.horowitz@getnexar.com,regan.okpiabhele@getnexar.com,dean.becker@getnexar.com,jon.miller@getnexar.com,fernando.cervera@getnexar.com,daniel.shihan@getnexar.com"
